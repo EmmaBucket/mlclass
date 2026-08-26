@@ -81,14 +81,16 @@ def setup_form(conn, uid):
     device, glasses, feeling, source(kind, value), reuse_calibration."""
     from tkinter import ttk, filedialog
     known = db.known_devices(conn, uid)
-    root = tk.Tk(); root.title("Session setup"); root.geometry("440x560")
+    root = tk.Tk(); root.title("Session setup"); root.geometry("440x620")
     root.resizable(True, True)
     pad = {"padx": 14, "pady": 5, "anchor": "w"}
 
     out = {}
 
     def start():
-        out.update(device=(device.get() or "unnamed").strip(),
+        cam = camera.get().strip()
+        out.update(camera=(None if cam.startswith("(") else cam),
+                   device=(device.get() or "unnamed").strip(),
                    glasses=int(glasses.get()),
                    feeling=(feeling.get() or None),
                    reuse=bool(reuse.get()),
@@ -104,6 +106,14 @@ def setup_form(conn, uid):
               command=start).pack(side="bottom", pady=14)
 
     tk.Label(root, text="Session setup", font=("Helvetica", 16, "bold")).pack(**pad)
+
+    tk.Label(root, text="Camera:").pack(**pad)
+    cam_names = [n for n, _ in camera_inventory()]
+    camera = ttk.Combobox(root, values=cam_names + ["(choose visually)"], width=28)
+    remembered_name = db.get_setting(conn, "camera_name")
+    camera.set(remembered_name if remembered_name in cam_names
+               else (cam_names[0] if cam_names else "(choose visually)"))
+    camera.pack(**pad)
 
     tk.Label(root, text="Screen / device:").pack(**pad)
     device = ttk.Combobox(root, values=known, width=28)
@@ -212,7 +222,16 @@ def _alive(cap, deadline_s=2.0):
     return False
 
 
-def pick_camera(max_probe=5, remembered=None, fingerprint=None):
+def open_camera(index, warm=1.2):
+    """Open one camera index and confirm it actually delivers frames."""
+    cap = cv2.VideoCapture(int(index))
+    if cap.isOpened() and _alive(cap, deadline_s=warm):
+        return cap
+    cap.release()
+    return None
+
+
+def pick_camera(max_probe=5, remembered=None, fingerprint=None, preferred_name=None):
     """Show a live thumbnail from every camera macOS offers; press its number.
 
     Why not just VideoCapture(0): on a Mac, index 0 is whichever camera the OS
@@ -231,8 +250,24 @@ def pick_camera(max_probe=5, remembered=None, fingerprint=None):
     # list still looks the same. The inventory check opens nothing.
     pick_camera.chosen = None
     pick_camera.explicit = False               # only a real user click saves a preference
+
+    # The reader named a camera in the setup form: use its position in the
+    # system_profiler list. Names are stable; indices are not.
+    if preferred_name:
+        names = [n for n, _ in camera_inventory()]
+        if preferred_name in names:
+            cap = open_camera(names.index(preferred_name))
+            if cap is not None:
+                pick_camera.chosen = names.index(preferred_name)
+                pick_camera.explicit = True
+                print(f"camera: {preferred_name}")
+                return cap
+            print(f"'{preferred_name}' would not start -- falling back")
     now_fp = camera_fingerprint()
-    if remembered is not None and (fingerprint is None or fingerprint == now_fp):
+    # A remembered index is only meaningful together with the camera line-up it
+    # was chosen from. Without a stored fingerprint we do NOT trust it -- that
+    # is how a stale '1' opened an iPhone's rear camera.
+    if remembered is not None and fingerprint and fingerprint == now_fp:
         try:
             cap = cv2.VideoCapture(int(remembered))
         except (TypeError, ValueError):
@@ -305,8 +340,10 @@ def tracking_preview(cap, face_mesh):
     BEFORE calibration. If the dots aren't on your pupils, no amount of
     calibration can fix it -- fix seating/lighting here instead.
 
-    SPACE continues (only enabled once tracking is healthy), Esc aborts."""
-    win = "tracking check -- SPACE when the dots sit on your pupils"
+    SPACE continues (only enabled once tracking is healthy), C switches to the
+    next camera (wrong one opened?), Esc aborts.
+    Returns True to continue, "switch" to try another camera, False to abort."""
+    win = "tracking check -- SPACE = go, C = other camera, Esc = quit"
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -343,10 +380,15 @@ def tracking_preview(cap, face_mesh):
         for j, m in enumerate(msgs):
             cv2.putText(frame, m, (12, 30 + 28 * j), cv2.FONT_HERSHEY_SIMPLEX,
                         0.7, (0, 255, 0) if healthy else (0, 0, 255), 2)
+        cv2.putText(frame, "SPACE = start   C = different camera   Esc = quit",
+                    (12, frame.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255, 255, 255), 2)
         cv2.imshow(win, frame)
         k = cv2.waitKey(15) & 0xFF
         if k == 27:
             cv2.destroyWindow(win); return False
+        if k in (ord("c"), ord("C")):
+            cv2.destroyWindow(win); return "switch"
         if k == 32 and healthy:
             cv2.destroyWindow(win); return True
 
@@ -653,7 +695,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v9: crash fix, stable camera identity, safe teardown"
+RECORDER_VERSION = "v10: pick your camera by name; C switches it in the preview"
 
 
 def main():
@@ -670,20 +712,43 @@ def main():
         print("setup cancelled"); return
 
     cap = pick_camera(remembered=db.get_setting(conn, "camera_index"),
-                      fingerprint=db.get_setting(conn, "camera_fingerprint"))
+                      fingerprint=db.get_setting(conn, "camera_fingerprint"),
+                      preferred_name=cfg.get("camera"))
     if cap is None:
         print("no camera found -- check System Settings > Privacy & Security > Camera")
         return
-    # Save the preference ONLY when the reader actually picked in the dialog.
-    # Overwriting after every run let one fallback silently destroy the choice.
-    if getattr(pick_camera, "explicit", False) and pick_camera.chosen is not None:
-        db.set_setting(conn, "camera_index", pick_camera.chosen)
-        db.set_setting(conn, "camera_fingerprint", camera_fingerprint())
     face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
 
-    # can the tracker even see your pupils? settle that before calibrating.
-    if not tracking_preview(cap, face_mesh):
-        print("aborted at tracking check"); cap.release(); return
+    # Can the tracker see your pupils -- and is this even the right camera?
+    # C cycles to the next one, so a wrong camera is never a dead end.
+    names = [n for n, _ in camera_inventory()]
+    while True:
+        verdict = tracking_preview(cap, face_mesh)
+        if verdict is True:
+            break
+        cap.release()
+        if verdict is False:
+            print("aborted at tracking check"); return
+        start = (pick_camera.chosen or 0) + 1        # "switch": try the next one
+        cap = None
+        for step in range(max(len(names), 5)):
+            idx = (start + step) % max(len(names), 5)
+            cap = open_camera(idx)
+            if cap is not None:
+                pick_camera.chosen = idx
+                pick_camera.explicit = True
+                print(f"camera: {names[idx] if idx < len(names) else 'index ' + str(idx)}")
+                break
+        if cap is None:
+            print("no other camera responded"); return
+
+    # Save the choice the reader CONFIRMED by pressing SPACE on a good preview,
+    # together with the camera line-up it belongs to.
+    if pick_camera.chosen is not None:
+        db.set_setting(conn, "camera_index", pick_camera.chosen)
+        db.set_setting(conn, "camera_fingerprint", camera_fingerprint())
+        if pick_camera.chosen < len(names):
+            db.set_setting(conn, "camera_name", names[pick_camera.chosen])
 
     calib_note = None
     prev = db.last_calibration(conn, uid, cfg["device"]) if cfg["reuse"] else None
