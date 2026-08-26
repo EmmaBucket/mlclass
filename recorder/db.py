@@ -15,7 +15,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -105,6 +105,12 @@ CREATE TABLE IF NOT EXISTS session_summary (
     median_dwell_ms REAL
 );
 
+-- small app preferences (last camera index, ...): survive across sessions
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 """
 
@@ -172,6 +178,28 @@ def save_calibration(conn, session_id, mapping, error_px):
     conn.execute("UPDATE sessions SET calibration = ?, calib_error = ? WHERE session_id = ?",
                  (json.dumps(mapping), error_px, session_id))
     conn.commit()
+
+
+def get_setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def set_setting(conn, key, value):
+    conn.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, str(value)))
+    conn.commit()
+
+
+def last_calibration(conn, user_id, device_label, max_error=150):
+    """Most recent trustworthy calibration for this user on this device, or None.
+    Lets a returning reader skip the dots -- with the drift risk on record."""
+    return conn.execute("""
+        SELECT session_id, calibration, calib_error, started_at
+        FROM sessions
+        WHERE user_id = ? AND device_label = ? AND calibration IS NOT NULL
+              AND calib_error IS NOT NULL AND calib_error < ?
+        ORDER BY started_at DESC LIMIT 1""",
+        (user_id, device_label, max_error)).fetchone()
 
 
 def add_event(conn, session_id, t_ms, kind, value):

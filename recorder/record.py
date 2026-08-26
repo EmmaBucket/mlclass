@@ -14,6 +14,9 @@ zero), norm->screen mapping is now calibrated per sitting (recorder/calibrate.py
 and storage is SQLite keyed by user_id instead of loose CSVs keyed by whatever
 name was typed that day ("Emma" and "Emma B" are different people to a CSV).
 """
+import json
+import re
+import subprocess
 import time
 import tkinter as tk
 from tkinter import simpledialog
@@ -72,6 +75,77 @@ def display_info():
         return None, None
 
 
+def setup_form(conn, uid):
+    """One window, every pre-session question -- her call: many sequential
+    dialogs fatigue the user before the reading even starts. Returns a dict:
+    device, glasses, feeling, source(kind, value), reuse_calibration."""
+    from tkinter import ttk, filedialog
+    known = db.known_devices(conn, uid)
+    root = tk.Tk(); root.title("Session setup"); root.geometry("440x560")
+    root.resizable(True, True)
+    pad = {"padx": 14, "pady": 5, "anchor": "w"}
+
+    out = {}
+
+    def start():
+        out.update(device=(device.get() or "unnamed").strip(),
+                   glasses=int(glasses.get()),
+                   feeling=(feeling.get() or None),
+                   reuse=bool(reuse.get()),
+                   kind=kind.get(),
+                   url=(url_box.get().strip() or DEFAULT_URL),
+                   file=picked["file"])
+        root.destroy()
+
+    # packed FIRST with side="bottom": the button owns the bottom strip no
+    # matter how tall the rest grows -- packed last, it was the first thing
+    # clipped when macOS fonts made the column taller than the window.
+    tk.Button(root, text="Start session", font=("Helvetica", 13, "bold"),
+              command=start).pack(side="bottom", pady=14)
+
+    tk.Label(root, text="Session setup", font=("Helvetica", 16, "bold")).pack(**pad)
+
+    tk.Label(root, text="Screen / device:").pack(**pad)
+    device = ttk.Combobox(root, values=known, width=28)
+    if known: device.set(known[0])
+    device.pack(**pad)
+
+    glasses = tk.BooleanVar()
+    tk.Checkbutton(root, text="wearing glasses", variable=glasses).pack(**pad)
+
+    tk.Label(root, text="How do you feel?").pack(**pad)
+    feeling = ttk.Combobox(root, values=["Energized", "Rested", "Neutral",
+                                         "Tired", "Fatigued"], width=28)
+    feeling.pack(**pad)
+
+    reuse = tk.BooleanVar(value=True)
+    tk.Checkbutton(root, text="reuse last good calibration for this device",
+                   variable=reuse).pack(**pad)
+
+    tk.Label(root, text="Read:").pack(**pad)
+    kind = tk.StringVar(value="url_adaptive")
+    tk.Radiobutton(root, text="web page -- ADAPTIVE layout", variable=kind,
+                   value="url_adaptive").pack(**pad)
+    tk.Radiobutton(root, text="web page -- original look", variable=kind,
+                   value="url").pack(**pad)
+    url_box = tk.Entry(root, width=44); url_box.pack(**pad)
+    picked = {"file": None}
+
+    def browse():
+        f = filedialog.askopenfilename(parent=root, title="Choose a text file",
+            filetypes=[("text", "*.txt *.md *.html *.htm"), ("all", "*.*")])
+        if f:
+            picked["file"] = f
+            kind.set("file")
+            file_btn.config(text="file: " + os.path.basename(f))
+
+    file_btn = tk.Button(root, text="...or choose a file on this computer", command=browse)
+    file_btn.pack(**pad)
+
+    root.mainloop()
+    return out or None
+
+
 def pick_device(conn, uid):
     """This user's known screens as buttons, plus 'new screen...'. Same idea as
     the user picker: a stored label beats retyping (and re-typo-ing) it."""
@@ -106,7 +180,39 @@ def ask(title, prompt):
 
 
 # ------------------------------------------------------------------ camera picker
-def pick_camera(max_probe=5):
+def camera_inventory():
+    """Names + stable Unique IDs of every camera macOS knows about, WITHOUT
+    opening any of them (so the iPhone never chimes). Returns [] off-macOS."""
+    try:
+        out = subprocess.run(["system_profiler", "-json", "SPCameraDataType"],
+                             capture_output=True, text=True, timeout=15).stdout
+        cams = json.loads(out).get("SPCameraDataType", [])
+        return [(c.get("_name", "?"), c.get("spcamera_unique-id", c.get("_name", "?")))
+                for c in cams]
+    except Exception:
+        return []
+
+
+def camera_fingerprint():
+    """A stable signature of the current camera line-up: sorted Unique IDs.
+    Same fingerprint => a saved index still means the same physical device."""
+    return "|".join(sorted(uid for _, uid in camera_inventory()))
+
+
+def _alive(cap, deadline_s=2.0):
+    """A camera is alive if ANY read succeeds within the deadline. macOS needs
+    warm-up frames, and a single failed first read used to send the user
+    straight back to the picker."""
+    end = time.monotonic() + deadline_s
+    while time.monotonic() < end:
+        ok, _ = cap.read()
+        if ok:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def pick_camera(max_probe=5, remembered=None, fingerprint=None):
     """Show a live thumbnail from every camera macOS offers; press its number.
 
     Why not just VideoCapture(0): on a Mac, index 0 is whichever camera the OS
@@ -115,38 +221,72 @@ def pick_camera(max_probe=5):
     hardcoded number breaks next week. Seeing the pictures is the only robust
     answer to 'which camera is which'.
     """
+    # A remembered camera opens directly -- probing every device wakes them all
+    # (a Continuity iPhone chimes every time).
+    #
+    # But an OpenCV index is not an identity: macOS renumbers devices when the
+    # iPhone appears or disappears, so index 1 can be the laptop today and gone
+    # tomorrow. So we remember the index TOGETHER with a fingerprint of the
+    # camera list at the time it was chosen, and only trust the index when the
+    # list still looks the same. The inventory check opens nothing.
+    pick_camera.chosen = None
+    pick_camera.explicit = False               # only a real user click saves a preference
+    now_fp = camera_fingerprint()
+    if remembered is not None and (fingerprint is None or fingerprint == now_fp):
+        try:
+            cap = cv2.VideoCapture(int(remembered))
+        except (TypeError, ValueError):
+            cap = None
+        if cap is not None:
+            if cap.isOpened() and _alive(cap):
+                pick_camera.chosen = int(remembered)
+                return cap
+            cap.release()
+    elif remembered is not None:
+        print("camera line-up changed since last time -- re-checking")
+
     found = []                                     # (index, VideoCapture, frame)
-    for i in range(max_probe):
+    n_known = len(camera_inventory()) or max_probe
+    for i in range(max(max_probe, n_known)):
         cap = cv2.VideoCapture(i)
-        ok, frame = cap.read() if cap.isOpened() else (False, None)
-        if ok:
+        ok = cap.isOpened() and _alive(cap, deadline_s=0.8)
+        frame = cap.read()[1] if ok else None
+        if ok and frame is not None:
             found.append((i, cap, frame))
         else:
             cap.release()
-            if found:      # indices are contiguous; first gap = end of the list
+            # stop once we have seen every camera the OS reported (a transient
+            # failure on one index used to hide every camera after it)
+            if len(found) >= n_known:
                 break
     if not found:
         return None
     if len(found) == 1:                            # nothing to choose between
+        pick_camera.chosen = found[0][0]
         return found[0][1]
 
     win = "press the number of the camera showing YOU (Esc = first)"
     choice = found[0][0]
+    names = [n for n, _ in camera_inventory()]
     while True:
         tiles = []
-        for i, cap, _ in found:                    # live view, not a stale frame
+        for k, (i, cap, last) in enumerate(found):  # live view, not a stale frame
             ok, frame = cap.read()
             if not ok:
-                continue
+                frame = last                        # one dropped read != blank strip
             t = cv2.resize(frame, (320, 240))
-            cv2.putText(t, str(i), (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 255, 0), 3)
+            label = f"{i}: {names[k]}" if k < len(names) else str(i)
+            cv2.putText(t, label[:22], (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             tiles.append(t)
+        if not tiles:                               # np.hstack([]) would raise
+            break
         cv2.imshow(win, np.hstack(tiles))
         k = cv2.waitKey(30) & 0xFF
         if k == 27:
             break
         if ord("0") <= k <= ord("9") and any(i == k - ord("0") for i, _, _ in found):
             choice = k - ord("0")
+            pick_camera.explicit = True             # a real choice: worth saving
             break
     cv2.destroyWindow(win)
     keep = None
@@ -155,6 +295,7 @@ def pick_camera(max_probe=5):
             keep = cap
         else:
             cap.release()
+    pick_camera.chosen = choice
     return keep
 
 
@@ -270,6 +411,110 @@ def run_calibration(cap, face_mesh, screen_w, screen_h):
 
 
 # ------------------------------------------------------------------- reading material
+def measured_wpm(conn, uid, default=135):
+    """The reader's own pace: distinct words visited per minute, averaged over
+    their sessions with trustworthy calibration (<150 px). Becomes the
+    read-along default -- the voice starts at the speed their eyes go."""
+    row = conn.execute("""
+        SELECT SUM(n)*60.0/SUM(dur) FROM (
+          SELECT COUNT(DISTINCT sa.word_index) n, MAX(sa.t_ms)/1000.0 dur
+          FROM samples sa JOIN sessions se USING(session_id)
+          WHERE se.user_id=? AND se.calib_error < 150 AND sa.word_index IS NOT NULL
+          GROUP BY sa.session_id HAVING dur > 30)""", (uid,)).fetchone()
+    return round(row[0]) if row and row[0] else default
+
+
+def fetch_article_text(url):
+    """Pull the readable text out of a web page: headings, paragraphs, list
+    items -- skipping script/style/nav chrome. Deliberately simple (stdlib
+    HTMLParser); good for article-like pages, not web apps."""
+    import urllib.request
+    from html.parser import HTMLParser
+
+    class Grab(HTMLParser):
+        KEEP = {"p", "h1", "h2", "h3", "li"}
+        SKIP = {"script", "style", "nav", "footer", "header", "aside"}
+
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.blocks, self.buf, self.keeping, self.skipping = [], [], 0, 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in self.SKIP: self.skipping += 1
+            elif tag in self.KEEP and not self.skipping: self.keeping += 1
+
+        def handle_endtag(self, tag):
+            if tag in self.SKIP: self.skipping = max(0, self.skipping - 1)
+            elif tag in self.KEEP and self.keeping:
+                self.keeping -= 1
+                text = " ".join("".join(self.buf).split())
+                if len(text.split()) >= 3:        # drop menu crumbs
+                    self.blocks.append(text)
+                self.buf = []
+
+        def handle_data(self, data):
+            if self.keeping and not self.skipping: self.buf.append(data)
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    html_bytes = urllib.request.urlopen(req, timeout=20).read()
+    g = Grab(); g.feed(html_bytes.decode("utf-8", errors="replace"))
+    text = "\n\n".join(g.blocks)
+    if len(text.split()) >= 50:
+        return text
+    # thin shell -> the page paints its content with JavaScript (bookdown does
+    # this: 51 KB of HTML, zero <p> tags). urllib sees the skeleton; a real
+    # browser sees the text. Render it headless and harvest what a reader sees.
+    print("static fetch too thin -- rendering the page in a headless browser...")
+    from selenium import webdriver
+    opts = webdriver.ChromeOptions()
+    opts.add_argument("--headless=new")
+    d = webdriver.Chrome(options=opts)
+    try:
+        d.get(url)
+        time.sleep(3)                       # let the scripts paint
+        blocks = d.execute_script("""
+            return [...document.querySelectorAll('p, h1, h2, h3, li')]
+              .filter(el => !el.closest('nav, footer, aside, header'))
+              .map(el => el.innerText.trim().replace(/\\s+/g, ' '))
+              .filter(t => t.split(' ').length >= 3);
+        """)
+        return "\n\n".join(blocks)
+    finally:
+        d.quit()
+
+
+def resolve_text(cfg):
+    """Turn the setup form's answers into (url_for_selenium, human_name)."""
+    if cfg["kind"] == "file" and cfg["file"]:
+        path = cfg["file"]
+        if path.lower().endswith((".html", ".htm")):
+            return "file://" + os.path.abspath(path), os.path.basename(path)
+        from recorder import adapt
+        out = adapt.build_page(path, os.path.join(os.path.dirname(DB_PATH), "texts"),
+                               wpm=pick_text.wpm)
+        return "file://" + os.path.abspath(out), os.path.basename(path)
+    url = cfg["url"]
+    if cfg["kind"] == "url_adaptive":
+        try:
+            text = fetch_article_text(url)
+            if len(text.split()) < 50:
+                raise ValueError("page yielded too little text")
+            tmp_dir = os.path.join(os.path.dirname(DB_PATH), "texts")
+            os.makedirs(tmp_dir, exist_ok=True)
+            name = re.sub(r"[^\w.-]+", "_", url.split("//")[-1])[:60]
+            src = os.path.join(tmp_dir, name + ".txt")
+            with open(src, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            from recorder import adapt
+            out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm)
+            return "file://" + os.path.abspath(out), url
+        except Exception as e:
+            print(f"could not adapt {url} ({e}); opening as-is\n"
+                  "  (a page with almost no text is usually a table-of-contents"
+                  " or stub chapter -- try a chapter URL with body text)")
+    return url, url
+
+
 def pick_text():
     """URL, or a local file (.txt/.md/.html). Local text is wrapped in a clean,
     readable page -- which later becomes the page the adaptive layout rewrites.
@@ -277,6 +522,9 @@ def pick_text():
     from tkinter import filedialog
     root = tk.Tk(); root.title("What to read?"); root.geometry("320x180")
     choice = {}
+
+    def use_url_adaptive():
+        choice["v"] = ("url_adaptive", None); root.destroy()
 
     def use_url():
         choice["v"] = ("url", None); root.destroy()
@@ -288,18 +536,41 @@ def pick_text():
             choice["v"] = ("file", path); root.destroy()
 
     tk.Label(root, text="Read from:", font=("Helvetica", 14)).pack(pady=10)
-    tk.Button(root, text="a web page (URL)", width=22, command=use_url).pack(pady=4)
-    tk.Button(root, text="a file on this computer", width=22, command=use_file).pack(pady=4)
+    tk.Button(root, text="web page -- ADAPTIVE layout", width=26,
+              command=use_url_adaptive).pack(pady=4)
+    tk.Button(root, text="web page -- original look", width=26,
+              command=use_url).pack(pady=4)
+    tk.Button(root, text="a file on this computer", width=26,
+              command=use_file).pack(pady=4)
     root.mainloop()
     kind, path = choice.get("v", ("url", None))
-    if kind == "url":
+    if kind in ("url", "url_adaptive"):
         url = ask("Text", "URL to read (blank = default):") or DEFAULT_URL
+        if kind == "url_adaptive":
+            try:
+                text = fetch_article_text(url)
+                if len(text.split()) < 50:
+                    raise ValueError("page yielded too little text")
+                tmp_dir = os.path.join(os.path.dirname(DB_PATH), "texts")
+                os.makedirs(tmp_dir, exist_ok=True)
+                name = re.sub(r"[^\w.-]+", "_", url.split("//")[-1])[:60]
+                src = os.path.join(tmp_dir, name + ".txt")
+                with open(src, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                from recorder import adapt
+                out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm)
+                return "file://" + os.path.abspath(out), url
+            except Exception as e:
+                print(f"could not adapt {url} ({e}); opening as-is\n"
+                      "  (a page with almost no text is usually a table-of-contents"
+                      " or stub chapter -- try a chapter URL with body text)")
         return url, url
     if path.lower().endswith((".html", ".htm")):
         return "file://" + os.path.abspath(path), os.path.basename(path)
     # plain text/markdown -> the adaptive page (profiles + hard-word styling)
     from recorder import adapt
-    out = adapt.build_page(path, os.path.join(os.path.dirname(DB_PATH), "texts"))
+    out = adapt.build_page(path, os.path.join(os.path.dirname(DB_PATH), "texts"),
+                           wpm=pick_text.wpm)
     return "file://" + os.path.abspath(out), os.path.basename(path)
 
 
@@ -321,18 +592,28 @@ def open_text(url):
         if (own.length > 0) {              // adaptive page: it brings its own
             own.forEach(span => {          // indexed spans -- rewrapping would
                 var r = span.getBoundingClientRect();   // destroy its styling
+                if (r.width <= 0 || r.height <= 0) return;
                 wordMap.push({text: span.innerText.trim(), left: r.left,
                               top: r.top + window.scrollY,
                               right: r.right, bottom: r.bottom + window.scrollY});
             });
             return wordMap;
         }
-        document.querySelectorAll('p, h1, h2, li').forEach(node => {
+        // Only LEAF blocks, and never site chrome. Rewriting a parent <li>
+        // detaches its nested children (a gitbook sidebar is ~200 nested <li>),
+        // which produced ~1,600 zero-area duplicate "words" and destroyed every
+        // navigation link on the page.
+        [...document.querySelectorAll('p, h1, h2, li')]
+          .filter(n => !n.querySelector('p, h1, h2, li'))
+          .filter(n => !n.closest('nav, aside, header, footer'))
+          .forEach(node => {
             node.innerHTML = node.innerText.split(/\\s+/)
                 .map(w => `<span>${w}</span>`).join(' ');
             node.querySelectorAll('span').forEach(span => {
                 var r = span.getBoundingClientRect();
-                if (span.innerText.trim().length > 0)
+                // a zero-area box is a hidden or collapsed element: it can never
+                // be looked at, and it would pollute the words table
+                if (span.innerText.trim().length > 0 && r.width > 0 && r.height > 0)
                     wordMap.push({text: span.innerText.trim(), left: r.left,
                                   top: r.top + window.scrollY,   // document coords
                                   right: r.right, bottom: r.bottom + window.scrollY});
@@ -365,51 +646,74 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
+RECORDER_VERSION = "v9: crash fix, stable camera identity, safe teardown"
+
+
 def main():
+    print(f"recorder {RECORDER_VERSION}")
     conn = db.connect(DB_PATH)
     uid = pick_user(conn)
     if uid is None:
         print("no user chosen"); return
 
-    self_report = ask("Before you read", "One word: how do you feel? (rested / tired / ...)")
-    screen_w, screen_h = pyautogui.size()
+    screen_w, screen_h = pyautogui.size()   # calibration + session row need these
 
-    cap = pick_camera()
+    cfg = setup_form(conn, uid)
+    if not cfg:
+        print("setup cancelled"); return
+
+    cap = pick_camera(remembered=db.get_setting(conn, "camera_index"),
+                      fingerprint=db.get_setting(conn, "camera_fingerprint"))
     if cap is None:
         print("no camera found -- check System Settings > Privacy & Security > Camera")
         return
+    # Save the preference ONLY when the reader actually picked in the dialog.
+    # Overwriting after every run let one fallback silently destroy the choice.
+    if getattr(pick_camera, "explicit", False) and pick_camera.chosen is not None:
+        db.set_setting(conn, "camera_index", pick_camera.chosen)
+        db.set_setting(conn, "camera_fingerprint", camera_fingerprint())
     face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
 
     # can the tracker even see your pupils? settle that before calibrating.
     if not tracking_preview(cap, face_mesh):
         print("aborted at tracking check"); cap.release(); return
 
-    while True:
-        print("calibrating...")
-        mapping, err = run_calibration(cap, face_mesh, screen_w, screen_h)
-        if mapping is None:
-            print("calibration aborted"); cap.release(); return
-        verdict = ("word-level ok" if err < 40 else
-                   "line-level only" if err < 120 else "poor")
-        print(f"calibration error: {err:.0f} px ({verdict})")
-        if err < 120:
-            break
-        again = ask("Calibration", f"Error {err:.0f} px is poor. Type r to redo "
-                    "(fix lighting/seating first), anything else to continue anyway:")
-        if (again or "").strip().lower() != "r":
-            break
+    calib_note = None
+    prev = db.last_calibration(conn, uid, cfg["device"]) if cfg["reuse"] else None
+    if prev:
+        # returning reader on a known screen: skip the dots. The trade is drift
+        # (today's seating differs from that day's), so the reuse is on record.
+        mapping, err = json.loads(prev[1]), prev[2]
+        calib_note = f"calibration reused from session {prev[0]} ({prev[3][:10]})"
+        print(f"reusing calibration from session {prev[0]}: {err:.0f} px on {cfg['device']}")
+    else:
+        while True:
+            print("calibrating...")
+            mapping, err = run_calibration(cap, face_mesh, screen_w, screen_h)
+            if mapping is None:
+                print("calibration aborted"); cap.release(); return
+            verdict = ("word-level ok" if err < 40 else
+                       "line-level only" if err < 120 else "poor")
+            print(f"calibration error: {err:.0f} px ({verdict})")
+            if err < 120:
+                break
+            again = ask("Calibration", f"Error {err:.0f} px is poor. Type r to redo "
+                        "(fix lighting/seating first), anything else to continue anyway:")
+            if (again or "").strip().lower() != "r":
+                break
 
-    url, text_name = pick_text()
+    pick_text.wpm = measured_wpm(conn, uid)
+    url, text_name = resolve_text(cfg)
     browser, word_map, off_x, off_y = open_text(url)
 
     mm_w, mm_h = display_info()
-    device = pick_device(conn, uid)
-    glasses = ask("Glasses", "Wearing glasses right now? (y/n)")
-    glasses = 1 if (glasses or "").strip().lower().startswith("y") else 0
     sid = db.start_session(conn, uid, text_source=text_name, screen_w=screen_w,
-                           screen_h=screen_h, self_report=self_report,
-                           screen_w_mm=mm_w, screen_h_mm=mm_h, device_label=device,
-                           glasses=glasses)
+                           screen_h=screen_h, self_report=cfg["feeling"],
+                           screen_w_mm=mm_w, screen_h_mm=mm_h,
+                           device_label=cfg["device"], glasses=cfg["glasses"])
+    if calib_note:
+        conn.execute("UPDATE sessions SET notes = ? WHERE session_id = ?",
+                     (calib_note, sid)); conn.commit()
     db.save_calibration(conn, sid, mapping, err)
     db.save_words(conn, sid, word_map)
 
@@ -433,6 +737,7 @@ def main():
                                    # per frame buys nothing -- people scroll on a
                                    # scale of seconds, gaze moves on a scale of ms
     profile = None                 # current reading mode, logged on every change
+    tts_state = None               # read-along state, logged on every change
     print("recording -- press q in the camera window to stop")
     try:
         while True:
@@ -450,9 +755,17 @@ def main():
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
-                            sy = browser.execute_script("return window.scrollY;")
+                            sy, prof, tts = browser.execute_script(
+                                "return [window.scrollY, window.__profile || null,"
+                                " window.__tts || null];")
                             if sy is not None:          # None while the page is mid-load
                                 scroll_y = float(sy)
+                            if prof != profile:         # reader switched mode: that's data
+                                profile = prof
+                                db.add_event(conn, sid, t_ms, "profile", prof)
+                            if tts != tts_state:        # read-along toggled / speed changed
+                                tts_state = tts
+                                db.add_event(conn, sid, t_ms, "tts", tts)
                         except Exception:
                             pass                        # browser busy/navigating: keep last value
                     wi = word_index.at(gaze_x, gaze_y, scroll_y, off_x, off_y)
@@ -466,24 +779,34 @@ def main():
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
-        # runs on q, on Ctrl-C, and on any bug: the session is always closed out
+        # runs on q, on Ctrl-C, and on any bug: the session is ALWAYS closed out
+        # and every resource released. Previously only the flush was protected,
+        # so Ctrl-C left the session unsummarised and Chrome/camera running.
         writer.flush()
-    fps = n_frames / max(time.monotonic() - t0, 1e-9)
+        fps = n_frames / max(time.monotonic() - t0, 1e-9)
+        db.end_session(conn, sid, camera_fps=fps)
+        for release in (browser.quit, cap.release, cv2.destroyAllWindows):
+            try:
+                release()
+            except Exception:
+                pass
 
     # ground truth, while the reading is fresh
     difficulty = ask("After reading", "How hard was that, 1 (easy) to 5 (very hard)?")
     if difficulty:
         db.add_check(conn, sid, "self_report", "difficulty 1-5", difficulty,
-                     word_start=0, word_end=len(word_map) - 1)
-
-    db.end_session(conn, sid, camera_fps=fps)
-    browser.quit(); cap.release(); cv2.destroyAllWindows()
+                     word_start=0, word_end=max(len(word_map) - 1, 0))
 
     print(f"\nsession {sid} saved ({n_frames} frames at {fps:.0f} fps)")
     print("history for this user:")
     for row in db.user_progress(conn, uid):
-        print(f"  session {row[0]}  {row[1]}  feel={row[2]}  {row[4]:.0f}s  "
-              f"face {row[5]:.0%}  {row[6]} words  median dwell {row[7] or 0:.0f} ms")
+        # a session that captured no frames has NULL summary stats; formatting
+        # None with :.0f raises, which used to crash the run AFTER the data was
+        # already safely saved -- the worst kind of cosmetic bug.
+        dur = f"{row[4]:.0f}s" if row[4] is not None else "  -  "
+        face = f"{row[5]:.0%}" if row[5] is not None else " - "
+        print(f"  session {row[0]}  {row[1]}  feel={row[2]}  {dur}  "
+              f"face {face}  {row[6] or 0} words  median dwell {row[7] or 0:.0f} ms")
 
 
 if __name__ == "__main__":
