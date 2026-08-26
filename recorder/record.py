@@ -509,9 +509,18 @@ def resolve_text(cfg):
             out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm)
             return "file://" + os.path.abspath(out), url
         except Exception as e:
-            print(f"could not adapt {url} ({e}); opening as-is\n"
-                  "  (a page with almost no text is usually a table-of-contents"
-                  " or stub chapter -- try a chapter URL with body text)")
+            # LOUD failure. This used to print only to a terminal the reader
+            # wasn't watching, so the session silently recorded the plain
+            # website and the adaptive design appeared "not to work".
+            print(f"could not adapt {url} ({e}); asking the reader")
+            retry = ask("Adaptive layout not possible",
+                        f"This page gave too little text to adapt ({e}).\n\n"
+                        "It is probably a contents page or a stub chapter.\n\n"
+                        "Enter a different URL to adapt instead, or leave blank "
+                        "to read the ORIGINAL page with no adaptive layout:")
+            if retry and retry.strip():
+                return resolve_text({**cfg, "url": retry.strip()})
+            print("continuing with the ORIGINAL page (no adaptive layout)")
     return url, url
 
 
@@ -561,9 +570,7 @@ def pick_text():
                 out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm)
                 return "file://" + os.path.abspath(out), url
             except Exception as e:
-                print(f"could not adapt {url} ({e}); opening as-is\n"
-                      "  (a page with almost no text is usually a table-of-contents"
-                      " or stub chapter -- try a chapter URL with body text)")
+                print(f"could not adapt {url} ({e}); opening as-is")
         return url, url
     if path.lower().endswith((".html", ".htm")):
         return "file://" + os.path.abspath(path), os.path.basename(path)
@@ -704,6 +711,9 @@ def main():
 
     pick_text.wpm = measured_wpm(conn, uid)
     url, text_name = resolve_text(cfg)
+    print("ADAPTIVE layout: " + ("YES -> " + os.path.basename(url)
+                                 if url.endswith(".adaptive.html")
+                                 else "NO (reading the original page)"))
     browser, word_map, off_x, off_y = open_text(url)
 
     mm_w, mm_h = display_info()
