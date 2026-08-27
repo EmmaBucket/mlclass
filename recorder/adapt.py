@@ -33,6 +33,8 @@ SCALE = {"word_len": 2.684, "logfreq": 2.276}
 COEF = {"word_len": 0.557, "logfreq": -0.287}
 INTERCEPT = -0.246
 
+_MODEL = None          # per-reader coefficients, set by build_page()
+
 _freq = None
 def word_logfreq(word):
     global _freq
@@ -43,12 +45,27 @@ def word_logfreq(word):
     return _freq.get(word.lower().strip('.,;:!?"()—’\''), 0.0)
 
 
-def hardness(word):
-    """0..1: probability this word gets a long dwell, per the GECO model."""
+def hardness(word, model=None):
+    """0..1: probability this word gets a long dwell.
+
+    Uses the reader's personalised coefficients when they have enough of their
+    own reading recorded, otherwise the GECO population model."""
+    coef = (model or _MODEL or {}).get("coef", COEF)
+    intercept = (model or _MODEL or {}).get("intercept", INTERCEPT)
     z_len = (len(word) - MEAN["word_len"]) / SCALE["word_len"]
     z_frq = (word_logfreq(word) - MEAN["logfreq"]) / SCALE["logfreq"]
-    logit = INTERCEPT + COEF["word_len"] * z_len + COEF["logfreq"] * z_frq
+    logit = intercept + coef["word_len"] * z_len + coef["logfreq"] * z_frq
     return 1 / (1 + math.exp(-logit))
+
+
+def _state_line(model):
+    """One line telling the reader how much of this page is tuned to them."""
+    if not model:
+        return ("Word difficulty: general reading model (not yet personalised) &mdash; "
+                "read a few well-calibrated sessions and this page starts tuning to you.")
+    return (f"Word difficulty: <b>{model['weight_you']:.0%} learned from your own reading</b> "
+            f"({model['n_words']:,} words across {model['sessions']} sessions), "
+            f"{1 - model['weight_you']:.0%} general reading model.")
 
 
 CSS = """
@@ -60,6 +77,8 @@ body { margin:0; background:var(--paper); color:var(--ink); }
               border-radius:16px; background:white; cursor:pointer; }
 #bar button.on { background:var(--accent); color:white; border-color:var(--accent); }
 #brand { font:700 15px -apple-system,sans-serif; color:var(--accent); margin-right:6px; }
+#pstate { background:#efe8f7; color:#4b3b60; padding:6px 16px;
+          font:12.5px -apple-system,sans-serif; border-bottom:1px solid #e0d3ef; }
 #hint { background:#f3ecfb; border-bottom:1px solid #e0d3ef; padding:10px 16px;
         font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px; align-items:center; }
 #hint .h3 { padding:0 3px; }
@@ -79,11 +98,20 @@ p { position:relative; }
 .speaking { background:#ffe9a8; border-radius:3px; }
 .marked { background:#d7f0ff; box-shadow:0 1px 0 #67b7e6; border-radius:2px; }
 .marked.hasnote { background:#c9e8c9; box-shadow:0 1px 0 #5aa75a; }
-#notes { position:fixed; right:0; top:0; bottom:0; width:300px; background:#fff;
-         border-left:1px solid #ddd; padding:14px; overflow:auto; display:none;
-         font:14px/1.5 -apple-system,sans-serif; z-index:20; }
+/* sits BELOW the toolbar (bar is z-index 9, top ~52px) so the play button,
+   voice picker and notes button are never covered */
+#notes { position:fixed; right:0; top:52px; bottom:0; width:300px; background:#fff;
+         border-left:1px solid #ddd; padding:14px 14px 40px; overflow:auto;
+         display:none; font:14px/1.5 -apple-system,sans-serif; z-index:8;
+         box-shadow:-4px 0 12px rgba(0,0,0,.06); }
 #notes.open { display:block; }
-#notes h4 { margin:0 0 10px; font-size:15px; }
+/* and the text moves over instead of hiding underneath */
+body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow + air */
+@media (max-width:820px) { body.notes-open #text { margin-right:0; } }
+#notes h4 { margin:0 0 10px; font-size:15px; padding-right:26px; }
+#noteclose { position:absolute; right:10px; top:10px; border:none; background:none;
+             font-size:20px; cursor:pointer; opacity:.5; line-height:1; }
+#noteclose:hover { opacity:1; }
 #notes .note { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }
 #notes .note b { display:block; color:#555; font-weight:600; }
 #notes textarea { width:100%; height:54px; font:13px -apple-system,sans-serif;
@@ -116,7 +144,7 @@ body.skim .lead, body.skim .h2, body.skim .h3 { opacity:1; }
 
 JS = """
 const PROFILES = ["comfort","focus","skim"];
-window.__profile = localStorage.getItem("profile") || "comfort";
+window.__profile = localStorage.getItem("profile") || DEFAULT_PROFILE;
 function setProfile(p){
   window.__profile = p; localStorage.setItem("profile", p);
   document.body.className = p;
@@ -139,8 +167,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("faster").onclick = () => bumpWpm(+15);
   setProfile(window.__profile);
   updateTTSUI();
-  document.getElementById("marks").onclick = () =>
-    document.getElementById("notes").classList.toggle("open");
+  document.getElementById("marks").onclick = () => showNotes();
+  document.getElementById("noteclose").onclick = () => showNotes(false);
   for (const sp of document.querySelectorAll("#text span[data-w]"))
     sp.onclick = () => markWord(sp);
   restoreMarks();
@@ -224,11 +252,20 @@ function currentWord(){
   }
   return best;
 }
+function showNotes(open){
+  const panel = document.getElementById("notes");
+  const want = (open === undefined) ? !panel.classList.contains("open") : open;
+  panel.classList.toggle("open", want);
+  document.body.classList.toggle("notes-open", want);   // shifts the text over
+}
 document.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "TEXTAREA") return;
+  if (e.target.tagName === "TEXTAREA") {                 // Esc leaves a note field
+    if (e.key === "Escape") e.target.blur();
+    return;
+  }
   if (e.key === "m" || e.key === "M") markWord(currentWord());
-  if (e.key === "n" || e.key === "N")
-    document.getElementById("notes").classList.toggle("open");
+  if (e.key === "n" || e.key === "N") showNotes();
+  if (e.key === "Escape") showNotes(false);
 });
 
 // ---------------- continuous read-along ----------------
@@ -312,10 +349,12 @@ function speakPar(i){
 """
 
 
-def build_page(text_path, out_dir, wpm=135):
+def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort"):
     """text/markdown file -> adaptive html page. Returns the output path.
     wpm: the reader's own measured pace (recorder computes it from their
     best-calibrated sessions); becomes the read-along default speed."""
+    global _MODEL
+    _MODEL = model                       # used by hardness() for every word below
     raw = open(text_path, encoding="utf-8", errors="replace").read()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
     widx = 0
@@ -326,7 +365,7 @@ def build_page(text_path, out_dir, wpm=135):
         par = par.replace("**", "").replace("__", "")
         words_html = []
         for j, w in enumerate(par.split()):
-            h = hardness(w)
+            h = hardness(w, model)
             cls = ["lead"] if j < 2 else []          # skim skeleton: first 2 words
             if h > 0.75: cls.append("h3")            # hardest: spacing + mark
             elif h > 0.6: cls.append("h2")           # hard: spacing + weight
@@ -340,8 +379,9 @@ def build_page(text_path, out_dir, wpm=135):
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("<!doctype html><html><head><meta charset='utf-8'>"
                  f"<title>{html.escape(os.path.basename(text_path))}</title>"
-                 f"<style>{CSS}</style><script>const DEFAULT_WPM={int(wpm)};{JS}</script></head>"
-                 "<body class='comfort'>"
+                 f"<style>{CSS}</style><script>const DEFAULT_WPM={int(wpm)};"
+                 f"const DEFAULT_PROFILE={profile!r};{JS}</script></head>"
+                 f"<body class='{profile}'>"
                  "<div id='bar'><span id='brand'>&#128065; Adaptive Reading</span>"
                  "<b style='font:14px -apple-system'>mode:</b>"
                  "<button data-p='comfort'>Comfort</button>"
@@ -352,6 +392,7 @@ def build_page(text_path, out_dir, wpm=135):
                  "<button id='marks' title='marked passages'>&#9998; notes</button>"
                  "<select id='voice' title='voice'></select>"
                  "<button id='play'>&#9654; read along</button></div></div>"
+                 f"<div id='pstate'>{_state_line(model)}</div>"
                  "<div id='hint'><span>This page adapts to you: press <b>M</b> to "
                  "mark what you are reading, <b>N</b> for your notes &middot; "
                  "<span class='h3'>marked words</span> are ones readers usually find "
@@ -359,6 +400,9 @@ def build_page(text_path, out_dir, wpm=135):
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"
                  "</button></div>"
                  f"<div id='text'>{''.join(body)}</div>"
-                 "<div id='notes'><h4>Marked while reading</h4>"
-                 "<div id='notelist'></div></div></body></html>")
+                 "<div id='notes'><button id='noteclose' title='close'>&times;</button>"
+                 "<h4>Marked while reading</h4>"
+                 "<div id='notelist'></div>"
+                 "<p style='color:#888;font-size:12px'>M marks the passage you are on "
+                 "&middot; N or Esc closes this panel</p></div></body></html>")
     return out

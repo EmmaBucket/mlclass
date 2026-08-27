@@ -126,6 +126,24 @@ def build(user_id=1):
                          f"<em>session {sid}</em></div>" for sid, q, nt in notes) or \
         "<i>Nothing marked yet. Press M while reading to mark a passage.</i>"
 
+    from recorder import personalize
+    pm = personalize.load(conn, user_id)
+    if pm:
+        pstate_html = (
+            f"<table><tr><td>learned from you</td><td>{bar(pm['weight_you']*100, 100, '#7a5c96')}%</td></tr>"
+            f"<tr><td>your words used</td><td>{pm['n_words']:,} from {pm['sessions']} well-calibrated sessions</td></tr>"
+            f"<tr><td>your own effect of word length</td><td>{pm['own_coef']['word_len']:+.3f}</td></tr>"
+            f"<tr><td>general model's word length</td><td>+0.557</td></tr></table>"
+            "<p class='caveat'>Every session you record re-fits this. The blend shifts "
+            "toward you as your own reading accumulates &mdash; half yours at about 3,000 "
+            "well-tracked words. Only sessions calibrated under 150px are used, because "
+            "word-level gaze from a badly calibrated session is noise, and training on "
+            "noise would make the page worse rather than better.</p>")
+    else:
+        pstate_html = ("<p class='caveat'>Not personalised yet &mdash; pages use the "
+                       "general reading model. It needs at least 150 words from sessions "
+                       "calibrated under 150px.</p>")
+
     good = [s for s in ss if (s["calib"] or 999) < GOOD_CALIB]
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>{name}'s reading account</title><style>
@@ -148,6 +166,9 @@ th {{ color:#666; font-weight:600; }}
 <h1>{name}'s reading account</h1>
 <p class="sub">{len(ss)} sessions &middot; {sum((s['dur'] or 0) for s in ss)/60:.0f} minutes read
 &middot; {len(good)} with trustworthy calibration (&lt;{GOOD_CALIB}px)</p>
+
+<h2>How personalised your pages are</h2>
+{pstate_html}
 
 <h2>Every session</h2>
 <table><tr><th>#</th><th>when</th><th>felt</th><th>screen</th><th>calib</th><th>length</th>

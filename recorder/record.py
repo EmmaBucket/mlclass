@@ -613,6 +613,15 @@ def fetch_article_text(url):
         d.quit()
 
 
+def favourite_profile(conn, user_id, default="comfort"):
+    """The reading mode this reader actually spends the most time in."""
+    rows = conn.execute("""
+        SELECT e.value, COUNT(*) FROM events e JOIN sessions s USING(session_id)
+        WHERE s.user_id = ? AND e.kind = 'profile' AND e.value IS NOT NULL
+        GROUP BY e.value ORDER BY COUNT(*) DESC LIMIT 1""", (user_id,)).fetchone()
+    return rows[0] if rows else default
+
+
 def resolve_text(cfg):
     """Turn the setup form's answers into (url_for_selenium, human_name)."""
     if cfg["kind"] == "file" and cfg["file"]:
@@ -621,7 +630,8 @@ def resolve_text(cfg):
             return "file://" + os.path.abspath(path), os.path.basename(path)
         from recorder import adapt
         out = adapt.build_page(path, os.path.join(os.path.dirname(DB_PATH), "texts"),
-                               wpm=pick_text.wpm)
+                               wpm=pick_text.wpm, model=resolve_text.model,
+                               profile=resolve_text.profile)
         return "file://" + os.path.abspath(out), os.path.basename(path)
     url = cfg["url"]
     if cfg["kind"] == "url_adaptive":
@@ -636,7 +646,8 @@ def resolve_text(cfg):
             with open(src, "w", encoding="utf-8") as fh:
                 fh.write(text)
             from recorder import adapt
-            out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm)
+            out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm,
+                                   model=resolve_text.model, profile=resolve_text.profile)
             return "file://" + os.path.abspath(out), url
         except Exception as e:
             # LOUD failure. This used to print only to a terminal the reader
@@ -783,7 +794,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v12: camera picks itself (the one that sees you); smoother voice; notes"
+RECORDER_VERSION = "v13: the page learns your reading; notes panel fixed"
 
 
 def main():
@@ -863,6 +874,14 @@ def main():
                 break
 
     pick_text.wpm = measured_wpm(conn, uid)
+    from recorder import personalize
+    resolve_text.model = personalize.load(conn, uid)      # None until enough data
+    resolve_text.profile = favourite_profile(conn, uid)
+    if resolve_text.model:
+        print(f"word difficulty: {resolve_text.model['weight_you']:.0%} learned from "
+              f"your own reading ({resolve_text.model['n_words']:,} words)")
+    else:
+        print("word difficulty: general model (not personalised yet)")
     url, text_name = resolve_text(cfg)
     print("ADAPTIVE layout: " + ("YES -> " + os.path.basename(url)
                                  if url.endswith(".adaptive.html")
@@ -967,6 +986,17 @@ def main():
     if difficulty:
         db.add_check(conn, sid, "self_report", "difficulty 1-5", difficulty,
                      word_start=0, word_end=max(len(word_map) - 1, 0))
+
+    # re-fit the reader's difficulty model with this session included, so the
+    # NEXT page they open is tuned a little more to them
+    try:
+        from recorder import personalize
+        m = personalize.fit(uid, DB_PATH, verbose=False)
+        if m:
+            print(f"personal model updated: {m['weight_you']:.0%} you "
+                  f"({m['n_words']:,} words, {m['sessions']} sessions)")
+    except Exception as e:
+        print(f"(could not update personal model: {e})")
 
     print(f"\nsession {sid} saved ({n_frames} frames at {fps:.0f} fps)")
     print("history for this user:")
