@@ -245,10 +245,11 @@ def set_screenshot(conn, session_id, path):
     conn.commit()
 
 
-def save_words(conn, session_id, word_map):
+def save_words(conn, session_id, word_map, offset=0):
+    """offset lets a session span several chapters without word_index colliding."""
     conn.executemany(
         "INSERT OR REPLACE INTO words VALUES (?,?,?,?,?,?,?)",
-        [(session_id, i, w["text"], w["left"], w["top"], w["right"], w["bottom"])
+        [(session_id, offset + i, w["text"], w["left"], w["top"], w["right"], w["bottom"])
          for i, w in enumerate(word_map)])
     conn.commit()
 

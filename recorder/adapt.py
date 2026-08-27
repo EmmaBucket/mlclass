@@ -79,6 +79,12 @@ body { margin:0; background:var(--paper); color:var(--ink); }
 #brand { font:700 15px -apple-system,sans-serif; color:var(--accent); margin-right:6px; }
 #pstate { background:#efe8f7; color:#4b3b60; padding:6px 16px;
           font:12.5px -apple-system,sans-serif; border-bottom:1px solid #e0d3ef; }
+#next { display:block; margin:40px auto 80px; max-width:34rem; padding:16px 20px;
+        background:var(--accent); color:#fff; border-radius:12px; text-decoration:none;
+        font:600 17px -apple-system,sans-serif; text-align:center; }
+#next small { display:block; font-weight:400; opacity:.85; margin-top:3px; font-size:13px; }
+#next:hover { filter:brightness(1.08); }
+#nextbar { margin-left:8px; }
 #hint { background:#f3ecfb; border-bottom:1px solid #e0d3ef; padding:10px 16px;
         font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px; align-items:center; }
 #hint .h3 { padding:0 3px; }
@@ -167,6 +173,10 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("faster").onclick = () => bumpWpm(+15);
   setProfile(window.__profile);
   updateTTSUI();
+  if (sessionStorage.getItem("autoplay")) {      // arrived here mid-read-along
+    sessionStorage.removeItem("autoplay");
+    setTimeout(() => startFrom(0), 400);
+  }
   document.getElementById("marks").onclick = () => showNotes();
   document.getElementById("noteclose").onclick = () => showNotes(false);
   for (const sp of document.querySelectorAll("#text span[data-w]"))
@@ -320,9 +330,27 @@ function fillVoiceMenu(){
 }
 speechSynthesis.onvoiceschanged = fillVoiceMenu;
 
+function goNext(){
+  const a = document.getElementById("next");
+  if (!a) return false;
+  // carry the read-along state over the boundary: if the voice was reading,
+  // the next chapter starts reading itself
+  if (tts.on) sessionStorage.setItem("autoplay", "1");
+  location.href = a.getAttribute("href");
+  return true;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "TEXTAREA") return;
+  if (e.key === "ArrowRight" && (e.metaKey || e.altKey)) goNext();
+});
+
 function speakPar(i){
   const pars = paragraphs();
-  if (!tts.on || i >= pars.length) { stopTTS(); return; }
+  if (!tts.on || i >= pars.length) {
+    // finished the chapter while reading aloud -> roll straight into the next
+    if (tts.on && document.getElementById("next")) { goNext(); return; }
+    stopTTS(); return;
+  }
   tts.par = i;
   const spans = [...pars[i].querySelectorAll("span[data-w]")];
   // build the utterance from the word spans and remember where each word
@@ -349,7 +377,8 @@ function speakPar(i){
 """
 
 
-def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort"):
+def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
+               next_href=None, next_title=None):
     """text/markdown file -> adaptive html page. Returns the output path.
     wpm: the reader's own measured pace (recorder computes it from their
     best-calibrated sessions); becomes the read-along default speed."""
@@ -376,6 +405,11 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort"):
                     + " ".join(words_html) + "</p>")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, os.path.basename(text_path) + ".adaptive.html")
+    nav = ""
+    if next_href:
+        label = html.escape(next_title or "Next chapter")
+        nav = (f"<a id='next' href='{html.escape(next_href)}'>Next chapter &rarr;"
+               f"<small>{label}</small></a>")
     with open(out, "w", encoding="utf-8") as fh:
         fh.write("<!doctype html><html><head><meta charset='utf-8'>"
                  f"<title>{html.escape(os.path.basename(text_path))}</title>"
@@ -399,7 +433,7 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort"):
                  "hard &middot; pick a mode above &middot; &#9654; reads along at your "
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"
                  "</button></div>"
-                 f"<div id='text'>{''.join(body)}</div>"
+                 f"<div id='text'>{''.join(body)}{nav}</div>"
                  "<div id='notes'><button id='noteclose' title='close'>&times;</button>"
                  "<h4>Marked while reading</h4>"
                  "<div id='notelist'></div>"

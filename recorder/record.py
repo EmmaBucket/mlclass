@@ -81,7 +81,7 @@ def setup_form(conn, uid):
     device, glasses, feeling, source(kind, value), reuse_calibration."""
     from tkinter import ttk, filedialog
     known = db.known_devices(conn, uid)
-    root = tk.Tk(); root.title("Session setup"); root.geometry("440x620")
+    root = tk.Tk(); root.title("Session setup"); root.geometry("440x680")
     root.resizable(True, True)
     pad = {"padx": 14, "pady": 5, "anchor": "w"}
 
@@ -90,6 +90,7 @@ def setup_form(conn, uid):
     def start():
         cam = camera.get().strip()
         out.update(camera=(None if cam.startswith("(") else cam),
+                   chapters=int(chapters.get() or 3),
                    device=(device.get() or "unnamed").strip(),
                    glasses=int(glasses.get()),
                    feeling=(feeling.get() or None),
@@ -133,6 +134,11 @@ def setup_form(conn, uid):
     reuse = tk.BooleanVar(value=True)
     tk.Checkbutton(root, text="reuse last good calibration for this device",
                    variable=reuse).pack(**pad)
+
+    tk.Label(root, text="Chapters to prepare ahead:").pack(**pad)
+    chapters = ttk.Combobox(root, values=["1", "3", "5", "10"], width=6)
+    chapters.set("3")
+    chapters.pack(**pad)
 
     tk.Label(root, text="Read:").pack(**pad)
     kind = tk.StringVar(value="url_adaptive")
@@ -554,6 +560,21 @@ def measured_wpm(conn, uid, default=135):
     return round(row[0]) if row and row[0] else default
 
 
+def _next_link(html_text, base_url):
+    """Where does this page say the NEXT one is? Books are chapters, and a
+    reader who finishes one should not have to go hunting for the next."""
+    import urllib.parse
+    pats = [r'<link[^>]+rel="next"[^>]+href="([^"]+)"',
+            r'<a[^>]+href="([^"]+)"[^>]*class="[^"]*navigation-next',
+            r'<a[^>]+class="[^"]*navigation-next[^"]*"[^>]*href="([^"]+)"',
+            r'<a[^>]+rel="next"[^>]+href="([^"]+)"']
+    for pat in pats:
+        m = re.search(pat, html_text, re.I)
+        if m:
+            return urllib.parse.urljoin(base_url, m.group(1))
+    return None
+
+
 def fetch_article_text(url):
     """Pull the readable text out of a web page: headings, paragraphs, list
     items -- skipping script/style/nav chrome. Deliberately simple (stdlib
@@ -587,7 +608,9 @@ def fetch_article_text(url):
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     html_bytes = urllib.request.urlopen(req, timeout=20).read()
-    g = Grab(); g.feed(html_bytes.decode("utf-8", errors="replace"))
+    html_text = html_bytes.decode("utf-8", errors="replace")
+    fetch_article_text.next_url = _next_link(html_text, url)
+    g = Grab(); g.feed(html_text)
     text = "\n\n".join(g.blocks)
     if len(text.split()) >= 50:
         return text
@@ -602,15 +625,73 @@ def fetch_article_text(url):
     try:
         d.get(url)
         time.sleep(3)                       # let the scripts paint
-        blocks = d.execute_script("""
-            return [...document.querySelectorAll('p, h1, h2, h3, li')]
+        blocks, nxt = d.execute_script("""
+            const blocks = [...document.querySelectorAll('p, h1, h2, h3, li')]
               .filter(el => !el.closest('nav, footer, aside, header'))
               .map(el => el.innerText.trim().replace(/\\s+/g, ' '))
               .filter(t => t.split(' ').length >= 3);
+            const n = document.querySelector('link[rel=next], a.navigation-next, a[rel=next]');
+            return [blocks, n ? n.href : null];
         """)
+        fetch_article_text.next_url = nxt
         return "\n\n".join(blocks)
     finally:
         d.quit()
+
+
+def build_chapter_chain(url, depth=3):
+    """Adapt this chapter AND the next few, each linking on to the following one.
+
+    Reading a book means finishing a chapter and continuing. Building only the
+    page you started on turns every chapter boundary into a dead end -- so we
+    follow the book's own 'next' link and pre-build ahead. Cheap: a chapter is
+    ~1,000 words of text and a few hundred KB of HTML.
+    """
+    from recorder import adapt
+    tmp_dir = os.path.join(os.path.dirname(DB_PATH), "texts")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    chapters, seen, nxt = [], set(), url
+    while nxt and len(chapters) < max(1, depth) and nxt not in seen:
+        seen.add(nxt)
+        fetch_article_text.next_url = None
+        try:
+            text = fetch_article_text(nxt)
+        except Exception as e:
+            print(f"  could not fetch {nxt}: {e}")
+            break
+        following = fetch_article_text.next_url
+        if len(text.split()) >= 50:
+            name = re.sub(r"[^\w.-]+", "_", nxt.split("//")[-1])[:60]
+            src = os.path.join(tmp_dir, name + ".txt")
+            with open(src, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            blocks = [b for b in text.split("\n\n") if b.strip()]
+            title = next((b for b in blocks[:4] if re.match(r"\s*(chapter|part|\d+[.\s])",
+                                                            b, re.I)), None)
+            if not title:                       # else the first block that isn't the
+                title = blocks[1] if len(blocks) > 1 else blocks[0]   # book's own title
+            chapters.append({"src": src, "url": nxt, "title": title.strip()[:70]})
+        elif chapters:
+            print(f"  skipping {nxt.split('/')[-1]} (stub, {len(text.split())} words)")
+        nxt = following
+
+    if not chapters:
+        return []
+    built = []
+    for i, ch in enumerate(chapters):          # build backwards so each knows its next
+        pass
+    for i in range(len(chapters) - 1, -1, -1):
+        ch = chapters[i]
+        next_href = os.path.basename(built[0]) if built else None
+        next_title = chapters[i + 1]["title"] if i + 1 < len(chapters) else None
+        out = adapt.build_page(ch["src"], tmp_dir, wpm=pick_text.wpm,
+                               model=resolve_text.model, profile=resolve_text.profile,
+                               next_href=next_href, next_title=next_title)
+        built.insert(0, out)
+    print(f"  adapted {len(built)} chapter(s); Next moves through them without leaving "
+          f"the adaptive layout")
+    return built
 
 
 def favourite_profile(conn, user_id, default="comfort"):
@@ -636,19 +717,10 @@ def resolve_text(cfg):
     url = cfg["url"]
     if cfg["kind"] == "url_adaptive":
         try:
-            text = fetch_article_text(url)
-            if len(text.split()) < 50:
+            chain = build_chapter_chain(url, depth=int(cfg.get("chapters", 3)))
+            if not chain:
                 raise ValueError("page yielded too little text")
-            tmp_dir = os.path.join(os.path.dirname(DB_PATH), "texts")
-            os.makedirs(tmp_dir, exist_ok=True)
-            name = re.sub(r"[^\w.-]+", "_", url.split("//")[-1])[:60]
-            src = os.path.join(tmp_dir, name + ".txt")
-            with open(src, "w", encoding="utf-8") as fh:
-                fh.write(text)
-            from recorder import adapt
-            out = adapt.build_page(src, tmp_dir, wpm=pick_text.wpm,
-                                   model=resolve_text.model, profile=resolve_text.profile)
-            return "file://" + os.path.abspath(out), url
+            return "file://" + os.path.abspath(chain[0]), url
         except Exception as e:
             # LOUD failure. This used to print only to a terminal the reader
             # wasn't watching, so the session silently recorded the plain
@@ -734,7 +806,15 @@ def open_text(url):
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.get(url)
     time.sleep(3)
-    word_map = driver.execute_script("""
+    word_map = read_word_map(driver)
+    rect = driver.get_window_rect()
+    header = rect["height"] - driver.execute_script("return window.innerHeight;")
+    return driver, word_map, rect["x"], rect["y"] + header
+
+
+def read_word_map(driver):
+    """Where every word sits on the page right now. Re-run after navigation."""
+    return driver.execute_script("""
         var wordMap = [];
         var own = document.querySelectorAll('span[data-w]');
         if (own.length > 0) {              // adaptive page: it brings its own
@@ -769,9 +849,6 @@ def open_text(url):
         });
         return wordMap;
     """)
-    rect = driver.get_window_rect()
-    header = rect["height"] - driver.execute_script("return window.innerHeight;")
-    return driver, word_map, rect["x"], rect["y"] + header
 
 
 class WordIndex:
@@ -794,7 +871,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v13: the page learns your reading; notes panel fixed"
+RECORDER_VERSION = "v14: chapters flow into each other; page learns your reading"
 
 
 def main():
@@ -921,6 +998,8 @@ def main():
     profile = None                 # current reading mode, logged on every change
     tts_state = None               # read-along state, logged on every change
     marks_state = None             # marked passages + notes, mirrored to the db
+    page_href = browser.current_url  # watched so a chapter change remaps the words
+    word_offset = 0                  # keeps word_index unique across chapters
     print("recording -- press q in the camera window to stop")
     try:
         while True:
@@ -938,9 +1017,21 @@ def main():
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
-                            sy, prof, tts, marks = browser.execute_script(
+                            sy, prof, tts, marks, href = browser.execute_script(
                                 "return [window.scrollY, window.__profile || null,"
-                                " window.__tts || null, window.__marks || null];")
+                                " window.__tts || null, window.__marks || null,"
+                                " location.href];")
+                            if href != page_href:
+                                # reader moved to the next chapter: the old word
+                                # map describes a page that is no longer on screen.
+                                page_href = href
+                                new_map = read_word_map(browser)
+                                word_offset += len(word_map)
+                                word_map = new_map
+                                word_index = WordIndex(word_map)
+                                db.save_words(conn, sid, word_map, offset=word_offset)
+                                db.add_event(conn, sid, t_ms, "page", href.split("/")[-1])
+                                print(f"  -> chapter change: {len(word_map)} words remapped")
                             if sy is not None:          # None while the page is mid-load
                                 scroll_y = float(sy)
                             if prof != profile:         # reader switched mode: that's data
@@ -959,6 +1050,8 @@ def main():
                         except Exception:
                             pass                        # browser busy/navigating: keep last value
                     wi = word_index.at(gaze_x, gaze_y, scroll_y, off_x, off_y)
+                    if wi is not None:
+                        wi += word_offset
                 writer.add(t_ms, 1, f["norm_x"], f["norm_y"], gaze_x, gaze_y,
                            f["eye_span"], f["frown"], f["ear"],
                            scroll_y if f["norm_x"] is not None else None, wi)
