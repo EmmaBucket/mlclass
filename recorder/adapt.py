@@ -73,8 +73,21 @@ p { position:relative; }
 #rbar { margin-left:auto; display:flex; gap:6px; align-items:center;
         font:14px -apple-system,sans-serif; }
 #rbar button { border-radius:8px; padding:6px 10px; }
+#rbar select { font:13px -apple-system,sans-serif; padding:5px; border-radius:8px;
+               border:1px solid #bbb; background:white; max-width:140px; }
 #play.on { background:#2e7d32; color:white; border-color:#2e7d32; }
 .speaking { background:#ffe9a8; border-radius:3px; }
+.marked { background:#d7f0ff; box-shadow:0 1px 0 #67b7e6; border-radius:2px; }
+.marked.hasnote { background:#c9e8c9; box-shadow:0 1px 0 #5aa75a; }
+#notes { position:fixed; right:0; top:0; bottom:0; width:300px; background:#fff;
+         border-left:1px solid #ddd; padding:14px; overflow:auto; display:none;
+         font:14px/1.5 -apple-system,sans-serif; z-index:20; }
+#notes.open { display:block; }
+#notes h4 { margin:0 0 10px; font-size:15px; }
+#notes .note { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }
+#notes .note b { display:block; color:#555; font-weight:600; }
+#notes textarea { width:100%; height:54px; font:13px -apple-system,sans-serif;
+                  border:1px solid #ccc; border-radius:6px; padding:6px; }
 body.skim .speaking { opacity:1 !important; }
 
 /* COMFORT: the dyslexia-informed default. Big type, generous leading, short
@@ -117,15 +130,105 @@ document.addEventListener("DOMContentLoaded", () => {
     b.onclick = () => startFrom(+b.dataset.par);   // "start reading from here"
   document.getElementById("play").onclick = () =>
     tts.on ? stopTTS() : startFrom(tts.par || 0);
+  fillVoiceMenu();
+  document.getElementById("voice").onchange = (e) => {
+    localStorage.setItem("voice", e.target.value);
+    if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }
+  };
   document.getElementById("slower").onclick = () => bumpWpm(-15);
   document.getElementById("faster").onclick = () => bumpWpm(+15);
   setProfile(window.__profile);
   updateTTSUI();
+  document.getElementById("marks").onclick = () =>
+    document.getElementById("notes").classList.toggle("open");
+  for (const sp of document.querySelectorAll("#text span[data-w]"))
+    sp.onclick = () => markWord(sp);
+  restoreMarks();
   const hint = document.getElementById("hint");
   if (localStorage.getItem("hint_seen")) hint.style.display = "none";
   document.getElementById("hintx").onclick = () => {
     hint.style.display = "none"; localStorage.setItem("hint_seen", "1");
   };
+});
+
+// ---------------- marking + notes ----------------
+// Reading and writing pull in opposite directions: stopping to type loses your
+// place and breaks the flow the layout is trying to protect. So marking is one
+// keystroke (M) or one click, the mark PERSISTS, and the note can be written
+// later -- the passage is still highlighted and one click away.
+const marks = JSON.parse(localStorage.getItem("marks") || "{}");
+function saveMarks(){
+  localStorage.setItem("marks", JSON.stringify(marks));
+  window.__marks = JSON.stringify(Object.keys(marks).map(k => ({
+    w: +k, note: marks[k].note || "", text: marks[k].text })));   // recorder logs this
+  renderNotes();
+}
+function markWord(sp){
+  if (!sp) return;
+  const id = sp.dataset.w;
+  if (marks[id]) { delete marks[id]; sp.classList.remove("marked", "hasnote"); }
+  else {
+    const sibs = [...sp.parentElement.querySelectorAll("span[data-w]")];
+    const k = sibs.indexOf(sp);
+    marks[id] = { text: sibs.slice(Math.max(0, k - 3), k + 5).map(x => x.innerText).join(" "),
+                  note: "" };
+    sp.classList.add("marked");
+  }
+  saveMarks();
+}
+function renderNotes(){
+  const list = document.getElementById("notelist");
+  if (!list) return;
+  const ids = Object.keys(marks).sort((a, b) => a - b);
+  list.innerHTML = ids.length ? "" : "<i>Nothing marked yet.<br>Press M while reading, "
+                                     + "or click a word, to mark it.</i>";
+  for (const id of ids){
+    const d = document.createElement("div");
+    d.className = "note";
+    d.innerHTML = "<b>&ldquo;" + marks[id].text + "&rdquo;</b>";
+    const ta = document.createElement("textarea");
+    ta.value = marks[id].note; ta.placeholder = "your note...";
+    ta.onchange = () => {
+      marks[id].note = ta.value;
+      const sp = document.querySelector(`span[data-w="${id}"]`);
+      if (sp) sp.classList.toggle("hasnote", !!ta.value.trim());
+      saveMarks();
+    };
+    d.onclick = (e) => {
+      if (e.target === ta) return;
+      const sp = document.querySelector(`span[data-w="${id}"]`);
+      if (sp) sp.scrollIntoView({block:"center", behavior:"smooth"});
+    };
+    d.appendChild(ta); list.appendChild(d);
+  }
+}
+function restoreMarks(){
+  for (const id of Object.keys(marks)){
+    const sp = document.querySelector(`span[data-w="${id}"]`);
+    if (sp){ sp.classList.add("marked"); if (marks[id].note) sp.classList.add("hasnote"); }
+  }
+  renderNotes(); saveMarks();
+}
+// M marks whatever you are reading right now: the spoken word if the voice is
+// running, otherwise the word nearest the middle of the screen.
+function currentWord(){
+  const spoken = document.querySelector(".speaking");
+  if (spoken) return spoken;
+  const mid = window.innerHeight / 2;
+  let best = null, bestD = 1e9;
+  for (const sp of document.querySelectorAll("#text span[data-w]")){
+    const r = sp.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    const d = Math.abs(r.top + r.height / 2 - mid);
+    if (d < bestD){ bestD = d; best = sp; }
+  }
+  return best;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "TEXTAREA") return;
+  if (e.key === "m" || e.key === "M") markWord(currentWord());
+  if (e.key === "n" || e.key === "N")
+    document.getElementById("notes").classList.toggle("open");
 });
 
 // ---------------- continuous read-along ----------------
@@ -153,6 +256,33 @@ function bumpWpm(d){
   if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }  // take effect now
 }
 function startFrom(i){ tts.on = true; publish(); speechSynthesis.cancel(); speakPar(i); }
+// macOS ships several voice tiers. The default is the flat robotic one; the
+// Siri / Premium / Enhanced voices are markedly more human. Pick the best
+// available once, and let the reader change it.
+function bestVoice(){
+  const vs = speechSynthesis.getVoices().filter(v => v.lang.startsWith("en"));
+  if (!vs.length) return null;
+  const saved = localStorage.getItem("voice");
+  if (saved) { const hit = vs.find(v => v.name === saved); if (hit) return hit; }
+  const rank = v => (/siri/i.test(v.name) ? 0 :
+                     /premium|enhanced|natural|neural/i.test(v.name) ? 1 :
+                     /samantha|ava|allison|serena|zoe|evan|tom/i.test(v.name) ? 2 : 3);
+  return vs.sort((a, b) => rank(a) - rank(b))[0];
+}
+function fillVoiceMenu(){
+  const sel = document.getElementById("voice");
+  const vs = speechSynthesis.getVoices().filter(v => v.lang.startsWith("en"));
+  if (!vs.length || sel.options.length) return;
+  const best = bestVoice();
+  for (const v of vs){
+    const o = document.createElement("option");
+    o.value = v.name; o.textContent = v.name.replace(/ \(.*\)/, "");
+    if (best && v.name === best.name) o.selected = true;
+    sel.appendChild(o);
+  }
+}
+speechSynthesis.onvoiceschanged = fillVoiceMenu;
+
 function speakPar(i){
   const pars = paragraphs();
   if (!tts.on || i >= pars.length) { stopTTS(); return; }
@@ -163,7 +293,10 @@ function speakPar(i){
   let text = "", starts = [];
   for (const sp of spans) { starts.push(text.length); text += sp.innerText + " "; }
   const u = new SpeechSynthesisUtterance(text);
+  const v = bestVoice(); if (v) u.voice = v;
   u.rate = tts.wpm / 180;                        // rate 1.0 ~ 180 wpm
+  u.pitch = 1.0;
+  u.volume = 1.0;
   u.onboundary = (e) => {
     if (e.name && e.name !== "word") return;
     let k = starts.findIndex(st => st > e.charIndex) - 1;
@@ -171,7 +304,9 @@ function speakPar(i){
     if (k >= 0) { clearHi(); spans[k].classList.add("speaking");
                   spans[k].scrollIntoView({block:"center", behavior:"smooth"}); }
   };
-  u.onend = () => { if (tts.on) speakPar(i + 1); };
+  // a short breath between paragraphs: continuous speech with no pauses is a
+  // big part of what makes synthetic reading feel relentless
+  u.onend = () => { if (tts.on) setTimeout(() => speakPar(i + 1), 450); };
   speechSynthesis.speak(u);
 }
 """
@@ -214,11 +349,16 @@ def build_page(text_path, out_dir, wpm=135):
                  "<button data-p='skim'>Skim</button>"
                  "<div id='rbar'><button id='slower'>&minus;</button>"
                  "<span id='wpm'></span><button id='faster'>+</button>"
+                 "<button id='marks' title='marked passages'>&#9998; notes</button>"
+                 "<select id='voice' title='voice'></select>"
                  "<button id='play'>&#9654; read along</button></div></div>"
-                 "<div id='hint'><span>This page adapts to you: "
+                 "<div id='hint'><span>This page adapts to you: press <b>M</b> to "
+                 "mark what you are reading, <b>N</b> for your notes &middot; "
                  "<span class='h3'>marked words</span> are ones readers usually find "
                  "hard &middot; pick a mode above &middot; &#9654; reads along at your "
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"
                  "</button></div>"
-                 f"<div id='text'>{''.join(body)}</div></body></html>")
+                 f"<div id='text'>{''.join(body)}</div>"
+                 "<div id='notes'><h4>Marked while reading</h4>"
+                 "<div id='notelist'></div></div></body></html>")
     return out

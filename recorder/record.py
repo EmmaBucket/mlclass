@@ -242,6 +242,69 @@ def _alive(cap, deadline_s=2.0):
     return False
 
 
+def _sees_a_face(cap, face_mesh, tries=8):
+    """Does this camera have a person in front of it? The only question that
+    actually matters -- and unlike names or indices, the camera itself answers."""
+    for _ in range(tries):
+        ok, frame = cap.read()
+        if not ok:
+            continue
+        if face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).multi_face_landmarks:
+            return True
+    return False
+
+
+def auto_camera(face_mesh, preferred_name=None, max_probe=6):
+    """Open the camera that sees the reader -- no questions asked.
+
+    Naming cameras turned out to be unreliable on macOS: system_profiler omits
+    Continuity cameras, and even AVFoundation's order did not match OpenCV's
+    indices on this machine (verified from a user screenshot: labels landed on
+    the wrong tiles). So we stop trusting names and ask each camera directly.
+
+    Order tried: the remembered/preferred one, then everything else, with
+    phone-ish devices LAST so a nearby iPhone never wins by default.
+    """
+    inv = camera_inventory()
+    names = [n for n, _ in inv]
+    n_cams = max(len(inv), 2)
+
+    def phoneish(i):
+        n = names[i].lower() if i < len(names) else ""
+        return any(w in n for w in ("iphone", "ipad", "continuity", "desk view"))
+
+    order = list(range(min(n_cams, max_probe)))
+    if preferred_name and preferred_name in names:
+        p = names.index(preferred_name)
+        order = [p] + [i for i in order if i != p]
+    # snapshot positions BEFORE sorting: .index() on a list being sorted reads
+    # the half-sorted list and raises/misorders
+    pos = {v: k for k, v in enumerate(order)}
+    order.sort(key=lambda i: (phoneish(i), pos[i]))           # phones last, stable
+
+    opened = None
+    for i in order:
+        cap = open_camera(i, warm=1.0)
+        if cap is None:
+            continue
+        if _sees_a_face(cap, face_mesh):
+            label = names[i] if i < len(names) else f"index {i}"
+            print(f"camera: index {i} ({label}) -- it can see you")
+            auto_camera.chosen = i
+            return cap
+        if opened is None:                    # keep the first working one as a backup
+            opened = (i, cap)
+        else:
+            cap.release()
+    if opened:
+        i, cap = opened
+        print(f"camera: index {i} (no face detected yet -- press C in the preview "
+              f"to try another)")
+        auto_camera.chosen = i
+        return cap
+    return None
+
+
 def open_camera(index, warm=1.2):
     """Open one camera index and confirm it actually delivers frames."""
     cap = cv2.VideoCapture(int(index))
@@ -332,7 +395,10 @@ def pick_camera(max_probe=5, remembered=None, fingerprint=None, preferred_name=N
             if not ok:
                 frame = last                        # one dropped read != blank strip
             t = cv2.resize(frame, (320, 240))
-            label = f"{i}: {names[k]}" if k < len(names) else str(i)
+            # label by the camera's OWN index (found may skip indices), and
+            # strip non-ASCII -- OpenCV's font drew a curly apostrophe as "???"
+            raw = names[i] if i < len(names) else ""
+            label = f"{i}: {raw.encode('ascii', 'ignore').decode()}" if raw else str(i)
             cv2.putText(t, label[:22], (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             tiles.append(t)
         if not tiles:                               # np.hstack([]) would raise
@@ -717,7 +783,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v11: cameras listed in the order OpenCV uses (Continuity included)"
+RECORDER_VERSION = "v12: camera picks itself (the one that sees you); smoother voice; notes"
 
 
 def main():
@@ -733,13 +799,13 @@ def main():
     if not cfg:
         print("setup cancelled"); return
 
-    cap = pick_camera(remembered=db.get_setting(conn, "camera_index"),
-                      fingerprint=db.get_setting(conn, "camera_fingerprint"),
-                      preferred_name=cfg.get("camera"))
+    face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+    cap = auto_camera(face_mesh,
+                      preferred_name=cfg.get("camera") or db.get_setting(conn, "camera_name"))
     if cap is None:
         print("no camera found -- check System Settings > Privacy & Security > Camera")
         return
-    face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+    pick_camera.chosen = getattr(auto_camera, "chosen", 0)
 
     # Can the tracker see your pupils -- and is this even the right camera?
     # C cycles to the next one, so a wrong camera is never a dead end.
@@ -835,6 +901,7 @@ def main():
                                    # scale of seconds, gaze moves on a scale of ms
     profile = None                 # current reading mode, logged on every change
     tts_state = None               # read-along state, logged on every change
+    marks_state = None             # marked passages + notes, mirrored to the db
     print("recording -- press q in the camera window to stop")
     try:
         while True:
@@ -852,9 +919,9 @@ def main():
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
-                            sy, prof, tts = browser.execute_script(
+                            sy, prof, tts, marks = browser.execute_script(
                                 "return [window.scrollY, window.__profile || null,"
-                                " window.__tts || null];")
+                                " window.__tts || null, window.__marks || null];")
                             if sy is not None:          # None while the page is mid-load
                                 scroll_y = float(sy)
                             if prof != profile:         # reader switched mode: that's data
@@ -863,6 +930,13 @@ def main():
                             if tts != tts_state:        # read-along toggled / speed changed
                                 tts_state = tts
                                 db.add_event(conn, sid, t_ms, "tts", tts)
+                            if marks != marks_state:    # reader marked/annotated a passage
+                                marks_state = marks
+                                db.add_event(conn, sid, t_ms, "mark", marks)
+                                try:
+                                    db.save_notes(conn, sid, json.loads(marks or "[]"))
+                                except Exception:
+                                    pass
                         except Exception:
                             pass                        # browser busy/navigating: keep last value
                     wi = word_index.at(gaze_x, gaze_y, scroll_y, off_x, off_y)

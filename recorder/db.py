@@ -15,7 +15,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -104,6 +104,20 @@ CREATE TABLE IF NOT EXISTS session_summary (
     words_visited  INTEGER,
     median_dwell_ms REAL
 );
+
+-- passages the reader marked while reading, with any note they wrote.
+-- word_index ties a note to the exact word, so it can be shown again next time
+-- the same text is opened, and analysed against gaze (did marking follow a
+-- re-read? a long dwell?).
+CREATE TABLE IF NOT EXISTS notes (
+    note_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(session_id),
+    word_index INTEGER,
+    quote      TEXT,
+    note       TEXT,
+    updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_notes ON notes(session_id, word_index);
 
 -- small app preferences (last camera index, ...): survive across sessions
 CREATE TABLE IF NOT EXISTS settings (
@@ -200,6 +214,16 @@ def last_calibration(conn, user_id, device_label, max_error=150):
               AND calib_error IS NOT NULL AND calib_error < ?
         ORDER BY started_at DESC LIMIT 1""",
         (user_id, device_label, max_error)).fetchone()
+
+
+def save_notes(conn, session_id, items):
+    """Replace this session's notes with the page's current set."""
+    conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
+    conn.executemany(
+        "INSERT INTO notes (session_id, word_index, quote, note, updated_at) "
+        "VALUES (?,?,?,?,?)",
+        [(session_id, it.get("w"), it.get("text"), it.get("note"), now()) for it in items])
+    conn.commit()
 
 
 def add_event(conn, session_id, t_ms, kind, value):
