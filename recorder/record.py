@@ -107,7 +107,8 @@ def setup_form(conn, uid):
 
     tk.Label(root, text="Session setup", font=("Helvetica", 16, "bold")).pack(**pad)
 
-    tk.Label(root, text="Camera:").pack(**pad)
+    tk.Label(root, text="Camera (which one is pointed at you):",
+             font=("Helvetica", 12, "bold")).pack(**pad)
     cam_names = [n for n, _ in camera_inventory()]
     camera = ttk.Combobox(root, values=cam_names + ["(choose visually)"], width=28)
     remembered_name = db.get_setting(conn, "camera_name")
@@ -115,7 +116,8 @@ def setup_form(conn, uid):
                else (cam_names[0] if cam_names else "(choose visually)"))
     camera.pack(**pad)
 
-    tk.Label(root, text="Screen / device:").pack(**pad)
+    tk.Label(root, text="Screen you are reading on:",
+             font=("Helvetica", 12, "bold")).pack(**pad)
     device = ttk.Combobox(root, values=known, width=28)
     if known: device.set(known[0])
     device.pack(**pad)
@@ -191,9 +193,27 @@ def ask(title, prompt):
 
 # ------------------------------------------------------------------ camera picker
 def camera_inventory():
-    """Names + stable Unique IDs of every camera macOS knows about, WITHOUT
-    opening any of them (so the iPhone never chimes). Returns [] off-macOS."""
-    try:
+    """Cameras in AVFOUNDATION ORDER -- the same order OpenCV indexes -- without
+    opening any of them (no camera light, no iPhone chime). [(name, uid), ...]
+
+    Why not system_profiler (what this used to use): it OMITS Continuity
+    cameras entirely. With an iPhone connected, system_profiler said
+    [FaceTime, C920] while OpenCV saw [FaceTime, C920, iPhone] -- or a
+    different order again -- so "position 1" meant two different cameras and
+    picking the monitor webcam opened the phone.
+    """
+    try:                                    # PyObjC ships with Anaconda
+        import objc
+        ns = {}
+        objc.loadBundle("AVFoundation", ns,
+                        bundle_path="/System/Library/Frameworks/AVFoundation.framework")
+        devs = ns["AVCaptureDevice"].devicesWithMediaType_("vide")
+        got = [(str(d.localizedName()), str(d.uniqueID())) for d in devs]
+        if got:
+            return got
+    except Exception:
+        pass
+    try:                                    # fallback: misses Continuity cameras
         out = subprocess.run(["system_profiler", "-json", "SPCameraDataType"],
                              capture_output=True, text=True, timeout=15).stdout
         cams = json.loads(out).get("SPCameraDataType", [])
@@ -256,13 +276,15 @@ def pick_camera(max_probe=5, remembered=None, fingerprint=None, preferred_name=N
     if preferred_name:
         names = [n for n, _ in camera_inventory()]
         if preferred_name in names:
-            cap = open_camera(names.index(preferred_name))
+            idx = names.index(preferred_name)
+            cap = open_camera(idx)
             if cap is not None:
-                pick_camera.chosen = names.index(preferred_name)
+                pick_camera.chosen = idx
                 pick_camera.explicit = True
-                print(f"camera: {preferred_name}")
+                print(f"camera: index {idx} = {preferred_name} "
+                      f"(press C in the preview if that is the wrong one)")
                 return cap
-            print(f"'{preferred_name}' would not start -- falling back")
+            print(f"'{preferred_name}' (index {idx}) would not start -- falling back")
     now_fp = camera_fingerprint()
     # A remembered index is only meaningful together with the camera line-up it
     # was chosen from. Without a stored fingerprint we do NOT trust it -- that
@@ -695,7 +717,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v10: pick your camera by name; C switches it in the preview"
+RECORDER_VERSION = "v11: cameras listed in the order OpenCV uses (Continuity included)"
 
 
 def main():
