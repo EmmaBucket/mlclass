@@ -890,7 +890,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v16: code and equations survive; profile link on every page"
+RECORDER_VERSION = "v17: attention loop - the page responds to your gaze"
 
 
 def main():
@@ -1017,7 +1017,12 @@ def main():
     profile = None                 # current reading mode, logged on every change
     tts_state = None               # read-along state, logged on every change
     marks_state = None             # marked passages + notes, mirrored to the db
+    recall_state = None            # section summaries typed from memory
     page_href = browser.current_url  # watched so a chapter change remaps the words
+    from collections import deque
+    on_text = deque(maxlen=300)      # ~10 s: was the gaze on a word?
+    on_text_base = deque(maxlen=3000)  # ~100 s: this reader's normal, this session
+    attention = None                 # last level pushed to the page
     word_offset = 0                  # keeps word_index unique across chapters
     print("recording -- press q in the camera window to stop")
     try:
@@ -1036,10 +1041,16 @@ def main():
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
-                            sy, prof, tts, marks, href = browser.execute_script(
+                            sy, prof, tts, marks, href, recall = browser.execute_script(
                                 "return [window.scrollY, window.__profile || null,"
                                 " window.__tts || null, window.__marks || null,"
-                                " location.href];")
+                                " location.href, window.__recall || null];")
+                            if recall != recall_state:
+                                recall_state = recall
+                                for item in json.loads(recall or "[]"):
+                                    db.add_check(conn, sid, "recall",
+                                                 f"section {item.get('at')} summary",
+                                                 item.get("text"))
                             if href != page_href:
                                 # reader moved to the next chapter: the old word
                                 # map describes a page that is no longer on screen.
@@ -1059,6 +1070,27 @@ def main():
                             if tts != tts_state:        # read-along toggled / speed changed
                                 tts_state = tts
                                 db.add_event(conn, sid, t_ms, "tts", tts)
+                            # ATTENTION, measured RELATIVE to this reader's own
+                            # baseline. An absolute threshold is wrong here: replaying
+                            # the recorded sessions, on-text rate is only ~35% even
+                            # while reading normally (words are small, webcam gaze is
+                            # coarse), so any fixed cutoff flagged 83-100% of every
+                            # session as distracted. Comparing the last ~10 s to the
+                            # last ~100 s of the SAME session flags 2-15% instead --
+                            # drops relative to how this person reads today.
+                            if len(on_text) >= 150 and len(on_text_base) >= 600:
+                                base = sum(on_text_base) / len(on_text_base)
+                                cur = sum(on_text) / len(on_text)
+                                if base > 0.02:
+                                    want = ("low" if cur < 0.55 * base else
+                                            "ok" if cur > 0.80 * base else attention)
+                                    if want != attention:
+                                        attention = want
+                                        browser.execute_script(
+                                            "window.setAttention && window.setAttention(arguments[0]);",
+                                            attention)
+                                        db.add_event(conn, sid, t_ms, "attention",
+                                                     f"{attention} (now {cur:.2f} vs base {base:.2f})")
                             if marks != marks_state:    # reader marked/annotated a passage
                                 marks_state = marks
                                 db.add_event(conn, sid, t_ms, "mark", marks)
@@ -1071,6 +1103,8 @@ def main():
                     wi = word_index.at(gaze_x, gaze_y, scroll_y, off_x, off_y)
                     if wi is not None:
                         wi += word_offset
+                    hit = 1 if wi is not None else 0
+                    on_text.append(hit); on_text_base.append(hit)
                 writer.add(t_ms, 1, f["norm_x"], f["norm_y"], gaze_x, gaze_y,
                            f["eye_span"], f["frown"], f["ear"],
                            scroll_y if f["norm_x"] is not None else None, wi)

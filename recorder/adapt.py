@@ -97,6 +97,26 @@ body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opa
 #profile { font:13px -apple-system,sans-serif; text-decoration:none; color:var(--accent);
            border:1px solid #d6c9e6; border-radius:16px; padding:7px 12px; }
 #profile:hover { background:#efe8f7; }
+/* focus spotlight: everything except the passage you are on recedes.
+   Used manually (F) and automatically when attention drops. */
+body.focusing #text p, body.focusing #text pre { opacity:.28; transition:opacity .5s; }
+body.focusing #text p.here, body.focusing #text pre.here { opacity:1; }
+#text p.here { box-shadow:-14px 0 0 -11px var(--accent); }
+#rail { position:fixed; left:0; top:0; height:3px; background:var(--accent);
+        width:0; z-index:30; transition:width .3s; }
+#left { position:fixed; right:14px; bottom:12px; font:12px -apple-system,sans-serif;
+        color:#7a6a8c; background:#fffffff0; padding:5px 10px; border-radius:12px;
+        border:1px solid #e6dcf0; z-index:12; }
+.recall { margin:26px auto; max-width:34rem; background:#fff; border:1px solid #e0d3ef;
+          border-left:4px solid var(--accent); border-radius:10px; padding:14px 16px;
+          font:15px/1.5 -apple-system,sans-serif; }
+.recall b { display:block; margin-bottom:6px; }
+.recall textarea { width:100%; height:52px; border:1px solid #ccc; border-radius:6px;
+                   padding:6px; font:14px -apple-system,sans-serif; }
+.recall .done { color:#2e7d32; font-size:13px; }
+.nudge { position:fixed; left:50%; transform:translateX(-50%); bottom:26px; z-index:40;
+         background:#4b3b60; color:#fff; padding:10px 16px; border-radius:20px;
+         font:14px -apple-system,sans-serif; box-shadow:0 4px 16px rgba(0,0,0,.2); }
 #hint { background:#f3ecfb; border-bottom:1px solid #e0d3ef; padding:10px 16px;
         font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px; align-items:center; }
 #hint .h3 { padding:0 3px; }
@@ -211,12 +231,103 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const sp of document.querySelectorAll("#text span[data-w]"))
     sp.onclick = () => markWord(sp);
   restoreMarks();
+  setupRecall();
+  updateProgress();
+  markHere();
+  if (localStorage.getItem("focusing")) setFocusing(true);
   const hint = document.getElementById("hint");
   if (localStorage.getItem("hint_seen")) hint.style.display = "none";
   document.getElementById("hintx").onclick = () => {
     hint.style.display = "none"; localStorage.setItem("hint_seen", "1");
   };
 });
+
+// ---------------- attention, progress, recall ----------------
+// Long technical reading fails in a specific way: you keep looking at the page
+// while your attention has left. Three counters against that, in increasing
+// order of intrusiveness:
+//   1. visible progress (how far, how much left, in YOUR minutes)
+//   2. a focus spotlight that quiets everything except the passage you are on
+//   3. a short recall prompt at section boundaries -- retrieval, not re-reading,
+//      is what actually keeps attention and memory alive
+function currentPar(){
+  const mid = window.innerHeight * 0.42;
+  let best = null, bestD = 1e9;
+  for (const p of document.querySelectorAll("#text p, #text pre")){
+    const r = p.getBoundingClientRect();
+    if (r.bottom < 0 || r.top > window.innerHeight) continue;
+    const d = Math.abs(r.top + Math.min(r.height, 200) / 2 - mid);
+    if (d < bestD){ bestD = d; best = p; }
+  }
+  return best;
+}
+function markHere(){
+  const p = currentPar();
+  for (const el of document.querySelectorAll(".here")) el.classList.remove("here");
+  if (p) p.classList.add("here");
+}
+function updateProgress(){
+  const doc = document.documentElement;
+  const done = Math.min(1, (window.scrollY + window.innerHeight) / doc.scrollHeight);
+  document.getElementById("rail").style.width = (done * 100).toFixed(1) + "%";
+  const words = document.querySelectorAll("#text p span[data-w]").length;
+  const leftWords = Math.max(0, Math.round(words * (1 - done)));
+  const mins = leftWords / Math.max(60, tts.wpm);
+  document.getElementById("left").textContent =
+    leftWords < 40 ? "nearly done" :
+    (mins < 1 ? "under a minute left" : `about ${Math.ceil(mins)} min left at your pace`);
+}
+function setFocusing(on){
+  document.body.classList.toggle("focusing", on);
+  markHere();
+  localStorage.setItem("focusing", on ? "1" : "");
+}
+// the recorder calls this from the eye tracker: "low" when the reader's gaze has
+// been off the text for a while, "ok" when it comes back.
+window.setAttention = function(level){
+  window.__attention = level;
+  if (level === "low" && !document.body.classList.contains("focusing")){
+    setFocusing(true);
+    nudge("Focus mode on \u2014 press F to turn it off");
+  } else if (level === "ok" && localStorage.getItem("autofocus_off") !== "1"){
+    // leave focus on; coming back should not flicker the page
+  }
+};
+let nudgeTimer = null;
+function nudge(msg){
+  let el = document.querySelector(".nudge");
+  if (!el){ el = document.createElement("div"); el.className = "nudge"; document.body.appendChild(el); }
+  el.textContent = msg;
+  clearTimeout(nudgeTimer);
+  nudgeTimer = setTimeout(() => el.remove(), 3200);
+}
+function setupRecall(){
+  // one prompt per section boundary, about every 700 words of prose
+  const pars = [...document.querySelectorAll("#text p")];
+  let acc = 0, n = 0;
+  for (const p of pars){
+    acc += p.querySelectorAll("span[data-w]").length;
+    if (acc >= 700){
+      acc = 0; n += 1;
+      const card = document.createElement("div");
+      card.className = "recall";
+      card.innerHTML = "<b>Quick check &mdash; in one sentence, what was that section about?</b>";
+      const ta = document.createElement("textarea");
+      ta.placeholder = "type it from memory, do not scroll back...";
+      const done = document.createElement("div");
+      ta.onchange = () => {
+        if (!ta.value.trim()) return;
+        recalls.push({at: n, text: ta.value.trim()});
+        window.__recall = JSON.stringify(recalls);
+        done.className = "done"; done.textContent = "saved with your notes \u2713";
+      };
+      card.appendChild(ta); card.appendChild(done);
+      p.after(card);
+    }
+  }
+}
+const recalls = [];
+document.addEventListener("scroll", () => { updateProgress(); markHere(); }, {passive: true});
 
 // ---------------- marking + notes ----------------
 // Reading and writing pull in opposite directions: stopping to type loses your
@@ -330,6 +441,11 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "m" || e.key === "M") markWord(currentWord());
+  if (e.key === "f" || e.key === "F"){
+    const on = !document.body.classList.contains("focusing");
+    setFocusing(on);
+    if (!on) localStorage.setItem("autofocus_off", "1");   // respect a manual opt-out
+  }
   if (e.key === "n" || e.key === "N") showNotes();
   if (e.key === "Escape") showNotes(false);
 });
@@ -528,11 +644,13 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<button id='play'>&#9654; read along</button></div></div>"
                  f"<div id='pstate'>{_state_line(model)}</div>"
                  "<div id='hint'><span>This page adapts to you: press <b>M</b> to "
-                 "mark what you are reading, <b>N</b> for your notes &middot; "
+                 "mark what you are reading, <b>N</b> for notes, <b>F</b> to focus "
+                 "on one passage at a time &middot; "
                  "<span class='h3'>marked words</span> are ones readers usually find "
                  "hard &middot; pick a mode above &middot; &#9654; reads along at your "
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"
                  "</button></div>"
+                 "<div id='rail'></div><div id='left'></div>"
                  f"<div id='text'>{''.join(body)}{nav}</div>"
                  "<div id='notes'><button id='noteclose' title='close'>&times;</button>"
                  "<h4>Marked while reading</h4>"

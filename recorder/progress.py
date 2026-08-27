@@ -118,6 +118,26 @@ def build(user_id=1):
         prof_html = ("<tr><td colspan=2><i>No reading-mode switches recorded yet. "
                      "Read an adaptive page and try Comfort / Focus / Skim.</i></td></tr>")
 
+    att = conn.execute("""
+        SELECT COUNT(*) FROM events e JOIN sessions s USING(session_id)
+        WHERE s.user_id = ? AND e.kind = 'attention' AND e.value LIKE 'low%'""",
+        (user_id,)).fetchone()[0]
+    rec = conn.execute("""
+        SELECT c.answer, c.session_id FROM checks c JOIN sessions s USING(session_id)
+        WHERE s.user_id = ? AND c.kind = 'recall' ORDER BY c.check_id DESC LIMIT 8""",
+        (user_id,)).fetchall()
+    focus_html = (f"<p>Focus mode was triggered by your own gaze <b>{att}</b> time(s) "
+                  f"across your sessions.</p>")
+    if rec:
+        focus_html += "<p>What you wrote from memory at section breaks:</p>" + "".join(
+            f"<div class='note'><b>{a}</b><em>session {sid}</em></div>" for a, sid in rec)
+    else:
+        focus_html += ("<p class='caveat'>No recall answers yet. The one-sentence prompt "
+                       "at each section break is the strongest known way to hold attention "
+                       "in long technical reading &mdash; retrieving beats re-reading &mdash; "
+                       "and your answers double as comprehension ground truth, which the "
+                       "eye data alone can never give you.</p>")
+
     notes = conn.execute("""
         SELECT n.session_id, n.quote, n.note FROM notes n JOIN sessions s USING(session_id)
         WHERE s.user_id = ? ORDER BY n.note_id DESC LIMIT 25""", (user_id,)).fetchall()
@@ -186,6 +206,9 @@ calibration to mean anything.</p>
 
 <h2>Which reading mode holds you longest</h2>
 <table>{prof_html}</table>
+
+<h2>Attention and recall</h2>
+{focus_html}
 
 <h2>What you marked</h2>
 {notes_html}
