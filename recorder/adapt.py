@@ -120,6 +120,16 @@ body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow +
 #noteclose:hover { opacity:1; }
 #notes .note { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }
 #notes .note b { display:block; color:#555; font-weight:600; }
+#notes .tags { margin:6px 0 4px; display:flex; gap:4px; flex-wrap:wrap; }
+#notes .tags button { border:1px solid #ccc; background:#fff; border-radius:12px;
+                      font-size:11px; padding:3px 8px; cursor:pointer; }
+#notes .tags button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+#notes .filter { margin-bottom:10px; font-size:12px; color:#666; }
+#notes .filter select { font-size:12px; padding:3px; }
+.marked.tag-question { background:#ffe0e6; box-shadow:0 1px 0 #e06f8b; }
+.marked.tag-definition { background:#e2e0ff; box-shadow:0 1px 0 #7b76d6; }
+.marked.tag-important { background:#ffeab0; box-shadow:0 1px 0 #d9a520; }
+.marked.tag-todo { background:#d8f0d8; box-shadow:0 1px 0 #5aa75a; }
 #notes textarea { width:100%; height:54px; font:13px -apple-system,sans-serif;
                   border:1px solid #ccc; border-radius:6px; padding:6px; }
 body.skim .speaking { opacity:1 !important; }
@@ -165,6 +175,13 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("play").onclick = () =>
     tts.on ? stopTTS() : startFrom(tts.par || 0);
   fillVoiceMenu();
+  document.getElementById("vtest").onclick = () => {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(
+      "Reading should feel easy. This is how this voice sounds at your pace.");
+    const v = bestVoice(); if (v) u.voice = v;
+    u.rate = tts.wpm / 180; speechSynthesis.speak(u);
+  };
   document.getElementById("voice").onchange = (e) => {
     localStorage.setItem("voice", e.target.value);
     if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }
@@ -198,7 +215,8 @@ const marks = JSON.parse(localStorage.getItem("marks") || "{}");
 function saveMarks(){
   localStorage.setItem("marks", JSON.stringify(marks));
   window.__marks = JSON.stringify(Object.keys(marks).map(k => ({
-    w: +k, note: marks[k].note || "", text: marks[k].text })));   // recorder logs this
+    w: +k, note: marks[k].note || "", text: marks[k].text,
+    tag: marks[k].tag || null })));                              // recorder logs this
   renderNotes();
 }
 function markWord(sp){
@@ -214,16 +232,40 @@ function markWord(sp){
   }
   saveMarks();
 }
+const TAGS = ["question", "definition", "important", "todo"];
+function applyTagClass(id){
+  const sp = document.querySelector(`span[data-w="${id}"]`);
+  if (!sp) return;
+  for (const t of TAGS) sp.classList.remove("tag-" + t);
+  if (marks[id].tag) sp.classList.add("tag-" + marks[id].tag);
+  sp.classList.toggle("hasnote", !!(marks[id].note || "").trim());
+}
 function renderNotes(){
   const list = document.getElementById("notelist");
   if (!list) return;
-  const ids = Object.keys(marks).sort((a, b) => a - b);
+  const filter = (document.getElementById("tagfilter") || {}).value || "all";
+  const ids = Object.keys(marks).sort((a, b) => a - b)
+                    .filter(id => filter === "all" || marks[id].tag === filter);
   list.innerHTML = ids.length ? "" : "<i>Nothing marked yet.<br>Press M while reading, "
                                      + "or click a word, to mark it.</i>";
   for (const id of ids){
     const d = document.createElement("div");
     d.className = "note";
     d.innerHTML = "<b>&ldquo;" + marks[id].text + "&rdquo;</b>";
+    const tagbar = document.createElement("div");
+    tagbar.className = "tags";
+    for (const t of TAGS){
+      const b = document.createElement("button");
+      b.textContent = t;
+      if (marks[id].tag === t) b.classList.add("on");
+      b.onclick = (ev) => {
+        ev.stopPropagation();
+        marks[id].tag = (marks[id].tag === t) ? null : t;   // click again to clear
+        applyTagClass(id); saveMarks();
+      };
+      tagbar.appendChild(b);
+    }
+    d.appendChild(tagbar);
     const ta = document.createElement("textarea");
     ta.value = marks[id].note; ta.placeholder = "your note...";
     ta.onchange = () => {
@@ -243,8 +285,10 @@ function renderNotes(){
 function restoreMarks(){
   for (const id of Object.keys(marks)){
     const sp = document.querySelector(`span[data-w="${id}"]`);
-    if (sp){ sp.classList.add("marked"); if (marks[id].note) sp.classList.add("hasnote"); }
+    if (sp){ sp.classList.add("marked"); applyTagClass(id); }
   }
+  const f = document.getElementById("tagfilter");
+  if (f) f.onchange = renderNotes;
   renderNotes(); saveMarks();
 }
 // M marks whatever you are reading right now: the spoken word if the voice is
@@ -353,8 +397,9 @@ function speakPar(i){
   }
   tts.par = i;
   const spans = [...pars[i].querySelectorAll("span[data-w]")];
-  // build the utterance from the word spans and remember where each word
-  // starts, so boundary events (charIndex) map back to a span to highlight
+  // Speak one SENTENCE at a time. A whole paragraph in one utterance makes the
+  // synthesiser run out of breath and flatten its intonation; sentence-sized
+  // chunks let it shape each one, and the gaps land where a human would pause.
   let text = "", starts = [];
   for (const sp of spans) { starts.push(text.length); text += sp.innerText + " "; }
   const u = new SpeechSynthesisUtterance(text);
@@ -371,7 +416,11 @@ function speakPar(i){
   };
   // a short breath between paragraphs: continuous speech with no pauses is a
   // big part of what makes synthetic reading feel relentless
-  u.onend = () => { if (tts.on) setTimeout(() => speakPar(i + 1), 450); };
+  // pause length follows the punctuation the paragraph ends on
+  const tail = text.trim().slice(-1);
+  const gap = tail === "." || tail === "!" || tail === "?" ? 480 :
+              tail === ":" || tail === ";" ? 340 : 260;
+  u.onend = () => { if (tts.on) setTimeout(() => speakPar(i + 1), gap); };
   speechSynthesis.speak(u);
 }
 """
@@ -425,6 +474,7 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<span id='wpm'></span><button id='faster'>+</button>"
                  "<button id='marks' title='marked passages'>&#9998; notes</button>"
                  "<select id='voice' title='voice'></select>"
+                 "<button id='vtest' title='hear this voice'>&#9835;</button>"
                  "<button id='play'>&#9654; read along</button></div></div>"
                  f"<div id='pstate'>{_state_line(model)}</div>"
                  "<div id='hint'><span>This page adapts to you: press <b>M</b> to "
@@ -436,6 +486,10 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  f"<div id='text'>{''.join(body)}{nav}</div>"
                  "<div id='notes'><button id='noteclose' title='close'>&times;</button>"
                  "<h4>Marked while reading</h4>"
+                 "<div class='filter'>show: <select id='tagfilter'>"
+                 "<option value='all'>all</option><option>question</option>"
+                 "<option>definition</option><option>important</option>"
+                 "<option>todo</option></select></div>"
                  "<div id='notelist'></div>"
                  "<p style='color:#888;font-size:12px'>M marks the passage you are on "
                  "&middot; N or Esc closes this panel</p></div></body></html>")

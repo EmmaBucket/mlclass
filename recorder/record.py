@@ -871,7 +871,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v14: chapters flow into each other; page learns your reading"
+RECORDER_VERSION = "v15: tag and export your notes; smoother speech pacing"
 
 
 def main():
@@ -1079,6 +1079,20 @@ def main():
     if difficulty:
         db.add_check(conn, sid, "self_report", "difficulty 1-5", difficulty,
                      word_start=0, word_end=max(len(word_map) - 1, 0))
+
+    # offer to keep the notes as a file, so the reading outlives the app
+    n_notes = conn.execute("SELECT COUNT(*) FROM notes WHERE session_id = ?",
+                           (sid,)).fetchone()[0]
+    if n_notes:
+        want = ask("Your notes", f"You marked {n_notes} passage(s).\n\n"
+                   "Save them as a file you can keep? (y/n)")
+        if (want or "").strip().lower().startswith("y"):
+            from recorder import export_notes
+            path = export_notes.export_session(conn, sid)
+            print(f"notes saved: {path}")
+        else:
+            print("notes kept in the database only "
+                  "(python3 recorder/export_notes.py to save them later)")
 
     # re-fit the reader's difficulty model with this session included, so the
     # NEXT page they open is tuned a little more to them

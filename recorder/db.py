@@ -15,7 +15,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS notes (
     word_index INTEGER,
     quote      TEXT,
     note       TEXT,
+    tag        TEXT,                            -- question / definition / important / todo
     updated_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_notes ON notes(session_id, word_index);
@@ -143,6 +144,9 @@ def connect(path="recorder/reading.db"):
                      ("glasses", "INTEGER")]:
         if col not in have:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
+    note_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+    if note_cols and "tag" not in note_cols:
+        conn.execute("ALTER TABLE notes ADD COLUMN tag TEXT")
     conn.execute("UPDATE schema_version SET version = ?", (SCHEMA_VERSION,))
     conn.commit()
     return conn
@@ -220,9 +224,10 @@ def save_notes(conn, session_id, items):
     """Replace this session's notes with the page's current set."""
     conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
     conn.executemany(
-        "INSERT INTO notes (session_id, word_index, quote, note, updated_at) "
-        "VALUES (?,?,?,?,?)",
-        [(session_id, it.get("w"), it.get("text"), it.get("note"), now()) for it in items])
+        "INSERT INTO notes (session_id, word_index, quote, note, tag, updated_at) "
+        "VALUES (?,?,?,?,?,?)",
+        [(session_id, it.get("w"), it.get("text"), it.get("note"), it.get("tag"), now())
+         for it in items])
     conn.commit()
 
 
