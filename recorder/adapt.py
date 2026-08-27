@@ -84,7 +84,19 @@ body { margin:0; background:var(--paper); color:var(--ink); }
         font:600 17px -apple-system,sans-serif; text-align:center; }
 #next small { display:block; font-weight:400; opacity:.85; margin-top:3px; font-size:13px; }
 #next:hover { filter:brightness(1.08); }
+pre.code { background:#f4f1ec; border:1px solid #e2ddd4; border-left:3px solid var(--accent);
+           border-radius:6px; padding:10px 14px; overflow-x:auto; margin:14px 0; }
+pre.code code { font:14px/1.55 "SF Mono",Menlo,Consolas,monospace; white-space:pre;
+                letter-spacing:normal !important; word-spacing:normal !important; }
+pre.code .cl { display:block; }
+/* code keeps its own look in every reading mode */
+body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opacity:1; }
+.math { font-family:"SF Mono",Menlo,monospace; letter-spacing:normal !important;
+        background:#f6f4ef; padding:0 2px; border-radius:3px; }
 #nextbar { margin-left:8px; }
+#profile { font:13px -apple-system,sans-serif; text-decoration:none; color:var(--accent);
+           border:1px solid #d6c9e6; border-radius:16px; padding:7px 12px; }
+#profile:hover { background:#efe8f7; }
 #hint { background:#f3ecfb; border-bottom:1px solid #e0d3ef; padding:10px 16px;
         font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px; align-items:center; }
 #hint .h3 { padding:0 3px; }
@@ -434,15 +446,51 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
     global _MODEL
     _MODEL = model                       # used by hardness() for every word below
     raw = open(text_path, encoding="utf-8", errors="replace").read()
-    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    # split on blank lines, but keep ```fenced``` blocks whole
+    parts, buf, in_code = [], [], False
+    for line in raw.split("\n"):
+        if line.strip().startswith("```"):
+            if in_code:
+                buf.append(line); parts.append("\n".join(buf)); buf, in_code = [], False
+            else:
+                if buf: parts.append("\n".join(buf))
+                buf, in_code = [line], True
+            continue
+        if in_code:
+            buf.append(line)
+        elif line.strip():
+            buf.append(line)
+        else:
+            if buf: parts.append("\n".join(buf))
+            buf = []
+    if buf: parts.append("\n".join(buf))
+    paragraphs = [p for p in parts if p.strip()]
+
     widx = 0
     body = []
     for par in paragraphs:
+        # CODE AND OUTPUT: never restyled, never re-spaced, never read aloud.
+        # Code is not prose -- letter-spacing and word-wrapping destroy its
+        # meaning, and "hard word" styling on a variable name is nonsense.
+        # Each LINE gets one span so gaze still maps to it.
+        if par.lstrip().startswith("```"):
+            lines = [l for l in par.split("\n") if not l.strip().startswith("```")]
+            rendered = []
+            for line in lines:
+                rendered.append(f'<span data-w="{widx}" class="cl">{html.escape(line)}</span>')
+                widx += 1
+            body.append("<pre class='code'><code>" + "\n".join(rendered) + "</code></pre>")
+            continue
         # light markdown: strip #/##/** noise but keep the text
         par = re.sub(r"^#{1,6}\s*", "", par)
         par = par.replace("**", "").replace("__", "")
         words_html = []
         for j, w in enumerate(par.split()):
+            # math stays exactly as written: \(x^2\), $\alpha$, 3.14e-8
+            if re.match(r"^(\\\(|\\\[|\$|\\begin)", w) or re.search(r"[=^_{}\\]", w):
+                words_html.append(f'<span data-w="{widx}" class="math">{html.escape(w)}</span>')
+                widx += 1
+                continue
             h = hardness(w, model)
             cls = ["lead"] if j < 2 else []          # skim skeleton: first 2 words
             if h > 0.75: cls.append("h3")            # hardest: spacing + mark
@@ -472,6 +520,8 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<button data-p='skim'>Skim</button>"
                  "<div id='rbar'><button id='slower'>&minus;</button>"
                  "<span id='wpm'></span><button id='faster'>+</button>"
+                 "<a id='profile' href='../progress.html' title='your reading profile'>"
+                 "&#128100; my reading</a>"
                  "<button id='marks' title='marked passages'>&#9998; notes</button>"
                  "<select id='voice' title='voice'></select>"
                  "<button id='vtest' title='hear this voice'>&#9835;</button>"

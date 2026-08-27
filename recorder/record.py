@@ -584,6 +584,7 @@ def fetch_article_text(url):
 
     class Grab(HTMLParser):
         KEEP = {"p", "h1", "h2", "h3", "li"}
+        CODE = {"pre"}                      # code and console output: keep verbatim
         SKIP = {"script", "style", "nav", "footer", "header", "aside"}
 
         def __init__(self):
@@ -592,10 +593,20 @@ def fetch_article_text(url):
 
         def handle_starttag(self, tag, attrs):
             if tag in self.SKIP: self.skipping += 1
-            elif tag in self.KEEP and not self.skipping: self.keeping += 1
+            elif tag in self.CODE and not self.skipping:
+                self.in_code = True; self.buf = []
+            elif tag in self.KEEP and not self.skipping and not getattr(self, "in_code", False):
+                self.keeping += 1
 
         def handle_endtag(self, tag):
             if tag in self.SKIP: self.skipping = max(0, self.skipping - 1)
+            elif tag in self.CODE and getattr(self, "in_code", False):
+                self.in_code = False
+                code = "".join(self.buf).strip("\n")
+                if code.strip():
+                    # fenced, so the page builder can render it as untouched code
+                    self.blocks.append("```\n" + code + "\n```")
+                self.buf = []
             elif tag in self.KEEP and self.keeping:
                 self.keeping -= 1
                 text = " ".join("".join(self.buf).split())
@@ -604,7 +615,10 @@ def fetch_article_text(url):
                 self.buf = []
 
         def handle_data(self, data):
-            if self.keeping and not self.skipping: self.buf.append(data)
+            if getattr(self, "in_code", False) and not self.skipping:
+                self.buf.append(data)                       # whitespace matters here
+            elif self.keeping and not self.skipping:
+                self.buf.append(data)
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     html_bytes = urllib.request.urlopen(req, timeout=20).read()
@@ -626,10 +640,15 @@ def fetch_article_text(url):
         d.get(url)
         time.sleep(3)                       # let the scripts paint
         blocks, nxt = d.execute_script("""
-            const blocks = [...document.querySelectorAll('p, h1, h2, h3, li')]
+            // keep code/output blocks verbatim and IN ORDER with the prose --
+            // a programming textbook is unreadable without them
+            const blocks = [...document.querySelectorAll('p, h1, h2, h3, li, pre')]
               .filter(el => !el.closest('nav, footer, aside, header'))
-              .map(el => el.innerText.trim().replace(/\\s+/g, ' '))
-              .filter(t => t.split(' ').length >= 3);
+              .filter(el => !(el.tagName !== 'PRE' && el.closest('pre')))
+              .map(el => el.tagName === 'PRE'
+                    ? '```\\n' + el.innerText.replace(/\\s+$/, '') + '\\n```'
+                    : el.innerText.trim().replace(/\\s+/g, ' '))
+              .filter(t => t.startsWith('```') || t.split(' ').length >= 3);
             const n = document.querySelector('link[rel=next], a.navigation-next, a[rel=next]');
             return [blocks, n ? n.href : null];
         """)
@@ -871,7 +890,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v15: tag and export your notes; smoother speech pacing"
+RECORDER_VERSION = "v16: code and equations survive; profile link on every page"
 
 
 def main():
@@ -1104,6 +1123,14 @@ def main():
                   f"({m['n_words']:,} words, {m['sessions']} sessions)")
     except Exception as e:
         print(f"(could not update personal model: {e})")
+
+    try:
+        from recorder import progress
+        prof_path = progress.build(uid)
+        if prof_path:
+            print(f"your reading profile updated: {prof_path}")
+    except Exception as e:
+        print(f"(could not update the profile page: {e})")
 
     print(f"\nsession {sid} saved ({n_frames} frames at {fps:.0f} fps)")
     print("history for this user:")
