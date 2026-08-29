@@ -150,7 +150,13 @@ body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow +
 #noteclose { position:absolute; right:10px; top:10px; border:none; background:none;
              font-size:20px; cursor:pointer; opacity:.5; line-height:1; }
 #noteclose:hover { opacity:1; }
-#notes .note { border-bottom:1px solid #eee; padding:8px 0; cursor:pointer; }
+#notes .note { border-bottom:1px solid #eee; padding:8px 24px 8px 0; position:relative; }
+#notes .note b { cursor:pointer; }
+#notes .del { position:absolute; right:0; top:8px; border:none; background:none;
+              font-size:17px; color:#b03030; cursor:pointer; opacity:.45; line-height:1; }
+#notes .del:hover { opacity:1; }
+#focusbtn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+::selection { background:#cfe8ff; }
 #notes .note b { display:block; color:#555; font-weight:600; }
 #notes .tags { margin:6px 0 4px; display:flex; gap:4px; flex-wrap:wrap; }
 #notes .tags button { border:1px solid #ccc; background:#fff; border-radius:12px;
@@ -226,6 +232,7 @@ document.addEventListener("DOMContentLoaded", () => {
     sessionStorage.removeItem("autoplay");
     setTimeout(() => startFrom(0), 400);
   }
+  document.getElementById("focusbtn").onclick = () => toggleFocus();
   document.getElementById("marks").onclick = () => showNotes();
   document.getElementById("noteclose").onclick = () => showNotes(false);
   for (const sp of document.querySelectorAll("#text span[data-w]"))
@@ -281,16 +288,32 @@ function setFocusing(on){
   document.body.classList.toggle("focusing", on);
   markHere();
   localStorage.setItem("focusing", on ? "1" : "");
+  const b = document.getElementById("focusbtn");
+  if (b){ b.classList.toggle("on", on); b.textContent = on ? "focus: on" : "focus"; }
+}
+// the ONLY way focus changes, from any of: F, Esc, the toolbar button, the
+// nudge's exit link, or the eye tracker
+function toggleFocus(force){
+  const on = (force === undefined) ? !document.body.classList.contains("focusing") : force;
+  setFocusing(on);
+  if (!on){
+    // a manual exit is a decision: do not let the tracker override it again
+    localStorage.setItem("autofocus_off", "1");
+    nudge("Focus mode off — it will stay off");
+  }
 }
 // the recorder calls this from the eye tracker: "low" when the reader's gaze has
 // been off the text for a while, "ok" when it comes back.
 window.setAttention = function(level){
   window.__attention = level;
+  // THE BUG THIS FIXES: this used to switch focus mode on for every dip in
+  // attention without checking whether the reader had already turned it off,
+  // so pressing F appeared to do nothing -- the page grabbed control back a few
+  // seconds later, with the text greyed out and no way out.
+  if (localStorage.getItem("autofocus_off") === "1") return;
   if (level === "low" && !document.body.classList.contains("focusing")){
     setFocusing(true);
-    nudge("Focus mode on \u2014 press F to turn it off");
-  } else if (level === "ok" && localStorage.getItem("autofocus_off") !== "1"){
-    // leave focus on; coming back should not flicker the page
+    nudge("Focus mode on — press F or Esc to leave it");
   }
 };
 let nudgeTimer = null;
@@ -328,100 +351,157 @@ function setupRecall(){
 }
 const recalls = [];
 document.addEventListener("scroll", () => { updateProgress(); markHere(); }, {passive: true});
+document.addEventListener("mousemove", markHere, {passive: true});
+setInterval(markHere, 1200);   // and while the voice reads and nothing else moves
 
-// ---------------- marking + notes ----------------
-// Reading and writing pull in opposite directions: stopping to type loses your
-// place and breaks the flow the layout is trying to protect. So marking is one
-// keystroke (M) or one click, the mark PERSISTS, and the note can be written
-// later -- the passage is still highlighted and one click away.
-const marks = JSON.parse(localStorage.getItem("marks") || "{}");
+// ---------------- highlighting + notes ----------------
+// One highlight = one note. Select a sentence with the mouse (or press M to take
+// the sentence you are on) and it becomes a single entry you can tag, annotate
+// and delete. Marks are stored as {id: {ws:[word ids], text, note, tag}} so a
+// highlight spanning twenty words is still ONE note, not twenty.
+const TAGS = ["question", "definition", "important", "todo"];
+let marks = JSON.parse(localStorage.getItem("marks") || "{}");
+// migrate the old one-word-per-note format
+for (const id of Object.keys(marks)) if (!marks[id].ws) marks[id].ws = [+id];
+
+function spanOf(id){ return document.querySelector(`#text span[data-w="${id}"]`); }
 function saveMarks(){
   localStorage.setItem("marks", JSON.stringify(marks));
   window.__marks = JSON.stringify(Object.keys(marks).map(k => ({
-    w: +k, note: marks[k].note || "", text: marks[k].text,
-    tag: marks[k].tag || null })));                              // recorder logs this
+    w: +k, ws: marks[k].ws, note: marks[k].note || "",
+    text: marks[k].text, tag: marks[k].tag || null })));
   renderNotes();
 }
-function markWord(sp){
-  if (!sp) return;
-  const id = sp.dataset.w;
-  if (marks[id]) { delete marks[id]; sp.classList.remove("marked", "hasnote"); }
-  else {
-    const sibs = [...sp.parentElement.querySelectorAll("span[data-w]")];
-    const k = sibs.indexOf(sp);
-    marks[id] = { text: sibs.slice(Math.max(0, k - 3), k + 5).map(x => x.innerText).join(" "),
-                  note: "" };
+function paintMark(id){
+  const m = marks[id];
+  if (!m) return;
+  for (const w of m.ws){
+    const sp = spanOf(w);
+    if (!sp) continue;
     sp.classList.add("marked");
+    for (const t of TAGS) sp.classList.remove("tag-" + t);
+    if (m.tag) sp.classList.add("tag-" + m.tag);
+    sp.classList.toggle("hasnote", !!(m.note || "").trim());
+    sp.dataset.mark = id;
   }
+}
+function removeMark(id){
+  for (const w of (marks[id] || {}).ws || []){
+    const sp = spanOf(w);
+    if (!sp) continue;
+    sp.classList.remove("marked", "hasnote", ...TAGS.map(t => "tag-" + t));
+    delete sp.dataset.mark;
+  }
+  delete marks[id];
   saveMarks();
 }
-const TAGS = ["question", "definition", "important", "todo"];
-function applyTagClass(id){
-  const sp = document.querySelector(`span[data-w="${id}"]`);
-  if (!sp) return;
-  for (const t of TAGS) sp.classList.remove("tag-" + t);
-  if (marks[id].tag) sp.classList.add("tag-" + marks[id].tag);
-  sp.classList.toggle("hasnote", !!(marks[id].note || "").trim());
+function addMark(spans){
+  spans = spans.filter(Boolean);
+  if (!spans.length) return;
+  const ws = spans.map(sp => +sp.dataset.w).sort((x, y) => x - y);
+  // if this overlaps an existing highlight, replace it rather than stacking
+  for (const id of Object.keys(marks))
+    if (marks[id].ws.some(w => ws.includes(w))) removeMark(id);
+  const id = ws[0];
+  marks[id] = {ws, text: spans.map(sp => sp.innerText).join(" ").trim(), note: "", tag: null};
+  paintMark(id);
+  saveMarks();
+  return id;
 }
+// the sentence around a word, inside its own paragraph
+function sentenceSpans(sp){
+  if (!sp) return [];
+  const sibs = [...sp.parentElement.querySelectorAll("span[data-w]")];
+  let i = sibs.indexOf(sp);
+  if (i < 0) return [sp];
+  let start = i, end = i;
+  while (start > 0 && !/[.!?]["')]?$/.test(sibs[start - 1].innerText)) start--;
+  while (end < sibs.length - 1 && !/[.!?]["')]?$/.test(sibs[end].innerText)) end++;
+  return sibs.slice(start, end + 1);
+}
+// what the mouse selected, snapped to whole words
+function selectedSpans(){
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return [];
+  const range = sel.getRangeAt(0);
+  const host = document.getElementById("text");
+  if (!host.contains(range.commonAncestorContainer)) return [];
+  return [...host.querySelectorAll("span[data-w]")]
+    .filter(sp => range.intersectsNode(sp));
+}
+document.addEventListener("mouseup", () => {
+  const spans = selectedSpans();
+  if (spans.length){
+    const id = addMark(spans);
+    window.getSelection().removeAllRanges();
+    showNotes(true);
+    const el = document.querySelector(`#notelist [data-note="${id}"] textarea`);
+    if (el) el.focus();
+  }
+});
+
 function renderNotes(){
   const list = document.getElementById("notelist");
   if (!list) return;
   const filter = (document.getElementById("tagfilter") || {}).value || "all";
-  const ids = Object.keys(marks).sort((a, b) => a - b)
+  const ids = Object.keys(marks).map(Number).sort((x, y) => x - y)
                     .filter(id => filter === "all" || marks[id].tag === filter);
-  list.innerHTML = ids.length ? "" : "<i>Nothing marked yet.<br>Press M while reading, "
-                                     + "or click a word, to mark it.</i>";
+  list.innerHTML = "";
+  if (!ids.length){
+    list.innerHTML = "<i>Nothing highlighted yet.<br>Select a sentence with the mouse, "
+                   + "or press M to take the sentence you are reading.</i>";
+    return;
+  }
   for (const id of ids){
+    const m = marks[id];
     const d = document.createElement("div");
     d.className = "note";
-    d.innerHTML = "<b>&ldquo;" + marks[id].text + "&rdquo;</b>";
+    d.dataset.note = id;
+
+    const del = document.createElement("button");
+    del.className = "del"; del.title = "delete this highlight"; del.innerHTML = "&times;";
+    del.onclick = (ev) => { ev.stopPropagation(); removeMark(id); };
+    d.appendChild(del);
+
+    const quote = document.createElement("b");
+    quote.textContent = "“" + m.text + "”";
+    quote.onclick = () => { const sp = spanOf(m.ws[0]);
+                            if (sp) sp.scrollIntoView({block: "center", behavior: "smooth"}); };
+    d.appendChild(quote);
+
     const tagbar = document.createElement("div");
     tagbar.className = "tags";
     for (const t of TAGS){
       const b = document.createElement("button");
       b.textContent = t;
-      if (marks[id].tag === t) b.classList.add("on");
-      b.onclick = (ev) => {
-        ev.stopPropagation();
-        marks[id].tag = (marks[id].tag === t) ? null : t;   // click again to clear
-        applyTagClass(id); saveMarks();
-      };
+      if (m.tag === t) b.classList.add("on");
+      b.onclick = (ev) => { ev.stopPropagation();
+                            m.tag = (m.tag === t) ? null : t; paintMark(id); saveMarks(); };
       tagbar.appendChild(b);
     }
     d.appendChild(tagbar);
+
     const ta = document.createElement("textarea");
-    ta.value = marks[id].note; ta.placeholder = "your note...";
-    ta.onchange = () => {
-      marks[id].note = ta.value;
-      const sp = document.querySelector(`span[data-w="${id}"]`);
-      if (sp) sp.classList.toggle("hasnote", !!ta.value.trim());
-      saveMarks();
-    };
-    d.onclick = (e) => {
-      if (e.target === ta) return;
-      const sp = document.querySelector(`span[data-w="${id}"]`);
-      if (sp) sp.scrollIntoView({block:"center", behavior:"smooth"});
-    };
-    d.appendChild(ta); list.appendChild(d);
+    ta.value = m.note || ""; ta.placeholder = "your note...";
+    ta.onchange = () => { m.note = ta.value; paintMark(id); saveMarks(); };
+    d.appendChild(ta);
+    list.appendChild(d);
   }
 }
 function restoreMarks(){
-  for (const id of Object.keys(marks)){
-    const sp = document.querySelector(`span[data-w="${id}"]`);
-    if (sp){ sp.classList.add("marked"); applyTagClass(id); }
-  }
+  for (const id of Object.keys(marks)) paintMark(id);
   const f = document.getElementById("tagfilter");
   if (f) f.onchange = renderNotes;
   renderNotes(); saveMarks();
 }
-// M marks whatever you are reading right now: the spoken word if the voice is
-// running, otherwise the word nearest the middle of the screen.
+// M takes the sentence you are on: the spoken one if the voice is reading,
+// otherwise the one nearest the middle of the screen.
 function currentWord(){
   const spoken = document.querySelector(".speaking");
   if (spoken) return spoken;
   const mid = window.innerHeight / 2;
   let best = null, bestD = 1e9;
-  for (const sp of document.querySelectorAll("#text span[data-w]")){
+  for (const sp of document.querySelectorAll("#text p span[data-w]")){
     const r = sp.getBoundingClientRect();
     if (r.bottom < 0 || r.top > window.innerHeight) continue;
     const d = Math.abs(r.top + r.height / 2 - mid);
@@ -433,21 +513,23 @@ function showNotes(open){
   const panel = document.getElementById("notes");
   const want = (open === undefined) ? !panel.classList.contains("open") : open;
   panel.classList.toggle("open", want);
-  document.body.classList.toggle("notes-open", want);   // shifts the text over
+  document.body.classList.toggle("notes-open", want);
 }
 document.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "TEXTAREA") {                 // Esc leaves a note field
+  if (e.target.tagName === "TEXTAREA"){
     if (e.key === "Escape") e.target.blur();
     return;
   }
-  if (e.key === "m" || e.key === "M") markWord(currentWord());
-  if (e.key === "f" || e.key === "F"){
-    const on = !document.body.classList.contains("focusing");
-    setFocusing(on);
-    if (!on) localStorage.setItem("autofocus_off", "1");   // respect a manual opt-out
+  if (e.key === "m" || e.key === "M"){
+    const id = addMark(sentenceSpans(currentWord()));
+    if (id !== undefined) nudge("Sentence highlighted — press N to write a note");
   }
   if (e.key === "n" || e.key === "N") showNotes();
-  if (e.key === "Escape") showNotes(false);
+  if (e.key === "f" || e.key === "F") toggleFocus();
+  if (e.key === "Escape"){
+    if (document.body.classList.contains("focusing")) toggleFocus(false);
+    else showNotes(false);
+  }
 });
 
 // ---------------- continuous read-along ----------------
@@ -540,6 +622,10 @@ function speakPar(i){
     let k = starts.findIndex(st => st > e.charIndex) - 1;
     if (k < -1+1 && starts[starts.length-1] <= e.charIndex) k = starts.length-1;
     if (k >= 0) { clearHi(); spans[k].classList.add("speaking");
+                  if (document.body.classList.contains("focusing")){
+                    for (const el of document.querySelectorAll(".here")) el.classList.remove("here");
+                    pars[i].classList.add("here");     // spotlight follows the voice
+                  }
                   spans[k].scrollIntoView({block:"center", behavior:"smooth"}); }
   };
   // a short breath between paragraphs: continuous speech with no pauses is a
@@ -638,14 +724,17 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<span id='wpm'></span><button id='faster'>+</button>"
                  "<a id='profile' href='../progress.html' title='your reading profile'>"
                  "&#128100; my reading</a>"
-                 "<button id='marks' title='marked passages'>&#9998; notes</button>"
+                 "<button id='focusbtn' title='dim everything except the passage "
+                 "you are reading (F)'>focus</button>"
+                 "<button id='marks' title='highlights and notes (N)'>&#9998; notes</button>"
                  "<select id='voice' title='voice'></select>"
                  "<button id='vtest' title='hear this voice'>&#9835;</button>"
                  "<button id='play'>&#9654; read along</button></div></div>"
                  f"<div id='pstate'>{_state_line(model)}</div>"
-                 "<div id='hint'><span>This page adapts to you: press <b>M</b> to "
-                 "mark what you are reading, <b>N</b> for notes, <b>F</b> to focus "
-                 "on one passage at a time &middot; "
+                 "<div id='hint'><span>This page adapts to you: "
+                 "<b>select any sentence</b> to highlight and note it "
+                 "(or <b>M</b> for the sentence you are on) &middot; <b>N</b> opens your "
+                 "notes &middot; <b>F</b> or <b>Esc</b> toggles focus &middot; "
                  "<span class='h3'>marked words</span> are ones readers usually find "
                  "hard &middot; pick a mode above &middot; &#9654; reads along at your "
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"

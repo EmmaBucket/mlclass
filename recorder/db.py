@@ -226,8 +226,8 @@ def save_notes(conn, session_id, items):
     conn.executemany(
         "INSERT INTO notes (session_id, word_index, quote, note, tag, updated_at) "
         "VALUES (?,?,?,?,?,?)",
-        [(session_id, it.get("w"), it.get("text"), it.get("note"), it.get("tag"), now())
-         for it in items])
+        [(session_id, (it.get("ws") or [it.get("w")])[0], it.get("text"),
+          it.get("note"), it.get("tag"), now()) for it in items])
     conn.commit()
 
 

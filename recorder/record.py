@@ -890,7 +890,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v17: attention loop - the page responds to your gaze"
+RECORDER_VERSION = "v18: highlight a sentence to note it; focus mode always escapable"
 
 
 def main():
