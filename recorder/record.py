@@ -831,18 +831,62 @@ def open_text(url):
     return driver, word_map, rect["x"], rect["y"] + header
 
 
+SCROLLER_JS = """
+// Find the element that actually scrolls this page. On our own adaptive pages
+// that is the window; on a gitbook/bookdown page the window NEVER moves --
+// an inner container (.body-inner) scrolls instead, so window.scrollY stays 0
+// forever and every gaze gets attributed to whatever word was at that screen
+// position when the page loaded.
+(function(){
+  const text = document.querySelector('#text') || document.body;
+  let el = text, found = null;
+  while (el && el !== document.body){
+    const st = getComputedStyle(el);
+    if (/(auto|scroll)/.test(st.overflowY) && el.scrollHeight > el.clientHeight + 4){
+      found = el; break;
+    }
+    el = el.parentElement;
+  }
+  if (!found){
+    for (const c of document.querySelectorAll('div,main,section,article')){
+      const st = getComputedStyle(c);
+      if (/(auto|scroll)/.test(st.overflowY) && c.scrollHeight > c.clientHeight + 40
+          && c.clientHeight > window.innerHeight * 0.5){ found = c; break; }
+    }
+  }
+  window.__mlScroller = found;
+  window.__mlScrollTop = function(){
+    return window.__mlScroller ? window.__mlScroller.scrollTop
+                               : (window.scrollY || document.documentElement.scrollTop || 0);
+  };
+  return found ? (found.id || found.className || found.tagName) : "window";
+})();
+"""
+
+
+def install_scroller(driver):
+    """Teach the page how to report its own scroll position. Returns a label."""
+    try:
+        return driver.execute_script(SCROLLER_JS) or "window"
+    except Exception as e:
+        print(f"  (could not detect the scroller: {e})")
+        return "window"
+
+
 def read_word_map(driver):
     """Where every word sits on the page right now. Re-run after navigation."""
+    install_scroller(driver)
     return driver.execute_script("""
         var wordMap = [];
         var own = document.querySelectorAll('span[data-w]');
         if (own.length > 0) {              // adaptive page: it brings its own
+            var st0 = window.__mlScrollTop ? window.__mlScrollTop() : window.scrollY;
             own.forEach(span => {          // indexed spans -- rewrapping would
                 var r = span.getBoundingClientRect();   // destroy its styling
                 if (r.width <= 0 || r.height <= 0) return;
                 wordMap.push({text: span.innerText.trim(), left: r.left,
-                              top: r.top + window.scrollY,
-                              right: r.right, bottom: r.bottom + window.scrollY});
+                              top: r.top + st0,
+                              right: r.right, bottom: r.bottom + st0});
             });
             return wordMap;
         }
@@ -860,10 +904,11 @@ def read_word_map(driver):
                 var r = span.getBoundingClientRect();
                 // a zero-area box is a hidden or collapsed element: it can never
                 // be looked at, and it would pollute the words table
+                var st = window.__mlScrollTop ? window.__mlScrollTop() : window.scrollY;
                 if (span.innerText.trim().length > 0 && r.width > 0 && r.height > 0)
                     wordMap.push({text: span.innerText.trim(), left: r.left,
-                                  top: r.top + window.scrollY,   // document coords
-                                  right: r.right, bottom: r.bottom + window.scrollY});
+                                  top: r.top + st,               // scroller coords
+                                  right: r.right, bottom: r.bottom + st});
             });
         });
         return wordMap;
@@ -890,7 +935,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v18: highlight a sentence to note it; focus mode always escapable"
+RECORDER_VERSION = "v19: scroll fix, note-taking aware, data-quality gate"
 
 
 def main():
@@ -993,6 +1038,8 @@ def main():
         conn.execute("UPDATE sessions SET notes = ? WHERE session_id = ?",
                      (calib_note, sid)); conn.commit()
     db.save_calibration(conn, sid, mapping, err)
+    conn.execute("UPDATE sessions SET scroll_source = ? WHERE session_id = ?",
+                 (str(install_scroller(browser))[:60], sid)); conn.commit()
     db.save_words(conn, sid, word_map)
 
     # one screenshot of the page as this reader saw it (~60 KB, ~0.7 s, once).
@@ -1020,9 +1067,18 @@ def main():
     recall_state = None            # section summaries typed from memory
     page_href = browser.current_url  # watched so a chapter change remaps the words
     from collections import deque
-    on_text = deque(maxlen=300)      # ~10 s: was the gaze on a word?
-    on_text_base = deque(maxlen=3000)  # ~100 s: this reader's normal, this session
+    # (t_ms, hit) pairs evicted BY TIME, not by count. Counting frames made the
+    # windows stretch with the camera's frame rate and with how often the reader
+    # looked away -- on the note-taking session the "10 s" window really spanned
+    # 13-63 s, exactly when the rule mattered most.
+    on_text = deque()                # last 10 s of frames where a face was visible
+    on_text_base = deque()           # last 100 s: this reader's normal, this session
+    WIN_MS, BASE_MS = 10_000, 100_000
+    HOLD_MS, COOLDOWN_MS, SETTLE_MS = 12_000, 30_000, 15_000
     attention = None                 # last level pushed to the page
+    att_cand, att_cand_since, last_flip, back_at = None, None, -1e9, -1e9
+    away_since = None                # face gone: reader is doing something else
+    away_state = False
     word_offset = 0                  # keeps word_index unique across chapters
     print("recording -- press q in the camera window to stop")
     try:
@@ -1036,13 +1092,25 @@ def main():
 
             if res.multi_face_landmarks:
                 f = features.extract(res.multi_face_landmarks[0].landmark, frame.shape)
+                if away_state:
+                    away_state = False
+                    try:
+                        browser.execute_script(
+                            "window.setPresence && window.setPresence('back');")
+                    except Exception:
+                        pass
+                    db.add_event(conn, sid, t_ms, "presence", f"back after {(t_ms-(away_since or t_ms))/1000:.1f}s")
+                    on_text.clear()          # the last 10 s were spent writing, not reading
+                    back_at = t_ms           # and give them a moment to find their place
+                away_since = None
                 gaze_x = gaze_y = wi = None
                 if f["norm_x"] is not None:
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
                             sy, prof, tts, marks, href, recall = browser.execute_script(
-                                "return [window.scrollY, window.__profile || null,"
+                                "return [(window.__mlScrollTop ? window.__mlScrollTop()"
+                                " : window.scrollY), window.__profile || null,"
                                 " window.__tts || null, window.__marks || null,"
                                 " location.href, window.__recall || null];")
                             if recall != recall_state:
@@ -1055,7 +1123,7 @@ def main():
                                 # reader moved to the next chapter: the old word
                                 # map describes a page that is no longer on screen.
                                 page_href = href
-                                new_map = read_word_map(browser)
+                                new_map = read_word_map(browser)   # re-installs the scroller
                                 word_offset += len(word_map)
                                 word_map = new_map
                                 word_index = WordIndex(word_map)
@@ -1078,14 +1146,33 @@ def main():
                             # session as distracted. Comparing the last ~10 s to the
                             # last ~100 s of the SAME session flags 2-15% instead --
                             # drops relative to how this person reads today.
-                            if len(on_text) >= 150 and len(on_text_base) >= 600:
-                                base = sum(on_text_base) / len(on_text_base)
-                                cur = sum(on_text) / len(on_text)
+                            span = (on_text[-1][0] - on_text[0][0]) if len(on_text) > 1 else 0
+                            base_span = ((on_text_base[-1][0] - on_text_base[0][0])
+                                         if len(on_text_base) > 1 else 0)
+                            # Only judge attention when the reader is present, the
+                            # windows are actually full, they have had a moment to
+                            # settle after looking away, and we have not just
+                            # changed state. Then require the new reading to PERSIST
+                            # for HOLD_MS before acting: a 12 s sustained drop is a
+                            # drifting reader, a 3 s one is a glance at the clock.
+                            # Tuned by replaying her real sessions: this took the
+                            # note-taking session from 51 state changes / 27.6% of the
+                            # session dimmed to 9 changes / 13.5%.
+                            if (not away_state and span > 8_000 and base_span > 60_000
+                                    and len(on_text) >= 60
+                                    and t_ms - back_at > SETTLE_MS
+                                    and t_ms - last_flip > COOLDOWN_MS):
+                                base = sum(h for _, h in on_text_base) / len(on_text_base)
+                                cur = sum(h for _, h in on_text) / len(on_text)
                                 if base > 0.02:
                                     want = ("low" if cur < 0.55 * base else
                                             "ok" if cur > 0.80 * base else attention)
-                                    if want != attention:
+                                    if want != att_cand:
+                                        att_cand, att_cand_since = want, t_ms
+                                    elif (want != attention
+                                          and t_ms - (att_cand_since or t_ms) > HOLD_MS):
                                         attention = want
+                                        last_flip = t_ms
                                         browser.execute_script(
                                             "window.setAttention && window.setAttention(arguments[0]);",
                                             attention)
@@ -1104,12 +1191,29 @@ def main():
                     if wi is not None:
                         wi += word_offset
                     hit = 1 if wi is not None else 0
-                    on_text.append(hit); on_text_base.append(hit)
+                    on_text.append((t_ms, hit)); on_text_base.append((t_ms, hit))
+                    while on_text and t_ms - on_text[0][0] > WIN_MS: on_text.popleft()
+                    while on_text_base and t_ms - on_text_base[0][0] > BASE_MS: on_text_base.popleft()
                 writer.add(t_ms, 1, f["norm_x"], f["norm_y"], gaze_x, gaze_y,
                            f["eye_span"], f["frown"], f["ear"],
                            scroll_y if f["norm_x"] is not None else None, wi)
             else:
                 writer.add(t_ms, 0)
+                # No face: the reader is looking away -- at paper, at a keyboard,
+                # at another screen. That is ABSENCE, not distraction, and the
+                # page must not "help" by dimming text at someone who is
+                # deliberately taking notes. Sustained absence pauses the voice
+                # and freezes the attention estimate instead.
+                if away_since is None:
+                    away_since = t_ms
+                elif not away_state and t_ms - away_since > 2500:
+                    away_state = True
+                    try:
+                        browser.execute_script(
+                            "window.setPresence && window.setPresence('away');")
+                    except Exception:
+                        pass
+                    db.add_event(conn, sid, t_ms, "presence", "away")
 
             cv2.imshow("recording (q to stop)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -1121,6 +1225,10 @@ def main():
         writer.flush()
         fps = n_frames / max(time.monotonic() - t0, 1e-9)
         db.end_session(conn, sid, camera_fps=fps)
+        flags = db.flag_data_quality(conn, sid)
+        if flags:
+            print(f"WARNING: this session is flagged {flags} -- its word-level data "
+                  f"will not be used to personalise your pages")
         for release in (browser.quit, cap.release, cv2.destroyAllWindows):
             try:
                 release()

@@ -15,7 +15,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     screen_h_mm  REAL,                          --   (same pixels can be very different text sizes)
     device_label TEXT,                          -- 'macbook-air-13' / 'office-monitor' / later: 'phone'
     glasses      INTEGER,                       -- 1/0: lenses reflect and refract; the model should know
+    scroll_source TEXT,                         -- which element actually scrolled
+    data_quality TEXT,                          -- '' = usable; else why not (e.g. scroll_frozen)
     screenshot_path TEXT,                       -- one full-page capture of what was read
     camera_fps   REAL,
     calibration  TEXT,                          -- JSON: the fitted gaze mapping
@@ -141,7 +143,8 @@ def connect(path="recorder/reading.db"):
     have = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
     for col, typ in [("screen_w_mm", "REAL"), ("screen_h_mm", "REAL"),
                      ("device_label", "TEXT"), ("screenshot_path", "TEXT"),
-                     ("glasses", "INTEGER")]:
+                     ("glasses", "INTEGER"), ("scroll_source", "TEXT"),
+                     ("data_quality", "TEXT")]:
         if col not in have:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} {typ}")
     note_cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
@@ -229,6 +232,37 @@ def save_notes(conn, session_id, items):
         [(session_id, (it.get("ws") or [it.get("w")])[0], it.get("text"),
           it.get("note"), it.get("tag"), now()) for it in items])
     conn.commit()
+
+
+def flag_data_quality(conn, session_id):
+    """Mark sessions whose word attribution cannot be trusted.
+
+    scroll_frozen: the recorded scroll offset never moved although the reader
+    was on the page long enough to have scrolled. Every gaze then lands on
+    whatever word occupied that screen position at load time -- the numbers look
+    fine and mean nothing, which is the most dangerous kind of broken.
+    """
+    row = conn.execute("""
+        SELECT MIN(scroll_y), MAX(scroll_y), COUNT(*), MAX(t_ms)/1000.0,
+               COUNT(DISTINCT word_index)
+        FROM samples WHERE session_id = ? AND scroll_y IS NOT NULL""",
+        (session_id,)).fetchone()
+    flags = []
+    if row and row[2] and row[0] == row[1] == 0.0 and (row[3] or 0) > 60 and (row[4] or 0) > 20:
+        flags.append("scroll_frozen")
+    conn.execute("UPDATE sessions SET data_quality = ? WHERE session_id = ?",
+                 (",".join(flags), session_id))
+    conn.commit()
+    return flags
+
+
+def backfill_data_quality(conn):
+    """Apply the quality check to sessions recorded before the check existed."""
+    flagged = []
+    for (sid,) in conn.execute("SELECT session_id FROM sessions WHERE data_quality IS NULL"):
+        if flag_data_quality(conn, sid):
+            flagged.append(sid)
+    return flagged
 
 
 def add_event(conn, session_id, t_ms, kind, value):

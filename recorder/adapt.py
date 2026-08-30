@@ -102,6 +102,9 @@ body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opa
 body.focusing #text p, body.focusing #text pre { opacity:.28; transition:opacity .5s; }
 body.focusing #text p.here, body.focusing #text pre.here { opacity:1; }
 #text p.here { box-shadow:-14px 0 0 -11px var(--accent); }
+/* where you left off when you looked away to write */
+.resume { animation:resumeflash 2.4s ease-out 1; }
+@keyframes resumeflash { 0% { background:#ffe9a8; } 100% { background:transparent; } }
 #rail { position:fixed; left:0; top:0; height:3px; background:var(--accent);
         width:0; z-index:30; transition:width .3s; }
 #left { position:fixed; right:14px; bottom:12px; font:12px -apple-system,sans-serif;
@@ -304,6 +307,24 @@ function toggleFocus(force){
 }
 // the recorder calls this from the eye tracker: "low" when the reader's gaze has
 // been off the text for a while, "ok" when it comes back.
+// The recorder calls this when the reader physically looks away (taking notes
+// on paper, for instance) and when they come back. Away is not distraction:
+// nothing gets dimmed, the voice simply waits for them.
+window.setPresence = function(state){
+  window.__presence = state;
+  if (state === "away"){
+    if (tts.on){ speechSynthesis.pause(); window.__ttsPaused = true; }
+    nudge("Paused — take your time with your notes");
+  } else if (state === "back"){
+    if (window.__ttsPaused){ speechSynthesis.resume(); window.__ttsPaused = false; }
+    const here = document.querySelector(".here") || document.querySelector(".speaking");
+    if (here){
+      here.classList.add("resume");
+      setTimeout(() => here.classList.remove("resume"), 2600);
+      nudge("Welcome back — you left off here");
+    }
+  }
+};
 window.setAttention = function(level){
   window.__attention = level;
   // THE BUG THIS FIXES: this used to switch focus mode on for every dip in

@@ -49,6 +49,7 @@ def collect(conn, user_id):
         JOIN words w ON w.session_id = sa.session_id AND w.word_index = sa.word_index
         WHERE se.user_id = ? AND se.calib_error IS NOT NULL AND se.calib_error < ?
               AND w.right - w.left > 0                       -- skip legacy junk rows
+              AND COALESCE(se.data_quality, '') = ''         -- and skip broken sessions
         GROUP BY sa.session_id, sa.word_index
         HAVING COUNT(*) >= 2""", (user_id, GOOD_CALIB)).fetchall()
     return rows
@@ -56,6 +57,7 @@ def collect(conn, user_id):
 
 def fit(user_id=1, db_path=DB, verbose=True):
     conn = _db.connect(db_path)
+    _db.backfill_data_quality(conn)     # never train on sessions we know are broken
     rows = collect(conn, user_id)
     if verbose:
         print(f"{len(rows)} word-observations from well-calibrated sessions")
