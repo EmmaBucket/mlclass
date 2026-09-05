@@ -406,8 +406,13 @@ p { position:relative; }
                border:1px solid #bbb; background:white; max-width:140px; }
 #play.on { background:#2e7d32; color:white; border-color:#2e7d32; }
 .speaking { background:#ffe9a8; border-radius:3px; }
-.marked { background:#d7f0ff; box-shadow:0 1px 0 #67b7e6; border-radius:2px; }
-.marked.hasnote { background:#c9e8c9; box-shadow:0 1px 0 #5aa75a; }
+/* Scoped under #text so a highlight WINS the cascade. A bare `.marked` lost its
+   background to `.codeword` (same specificity, declared later) and to
+   `body.comfort .h3` / `.b` and `body.focus .h2,.h3` (0-2-1) -- which punched
+   holes in every highlight at exactly the code, bold and hard words: the ones
+   most worth highlighting. That is the "only highlighting part of it" bug. */
+#text .marked { background:#d7f0ff; box-shadow:0 1px 0 #67b7e6; border-radius:2px; }
+#text .marked.hasnote { background:#c9e8c9; box-shadow:0 1px 0 #5aa75a; }
 /* sits BELOW the toolbar (bar is z-index 9, top ~52px) so the play button,
    voice picker and notes button are never covered */
 #notes { position:fixed; right:0; top:52px; bottom:0; width:300px; background:#fff;
@@ -436,10 +441,10 @@ body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow +
 #notes .tags button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 #notes .filter { margin-bottom:10px; font-size:12px; color:#666; }
 #notes .filter select { font-size:12px; padding:3px; }
-.marked.tag-question { background:#ffe0e6; box-shadow:0 1px 0 #e06f8b; }
-.marked.tag-definition { background:#e2e0ff; box-shadow:0 1px 0 #7b76d6; }
-.marked.tag-important { background:#ffeab0; box-shadow:0 1px 0 #d9a520; }
-.marked.tag-todo { background:#d8f0d8; box-shadow:0 1px 0 #5aa75a; }
+#text .marked.tag-question { background:#ffe0e6; box-shadow:0 1px 0 #e06f8b; }
+#text .marked.tag-definition { background:#e2e0ff; box-shadow:0 1px 0 #7b76d6; }
+#text .marked.tag-important { background:#ffeab0; box-shadow:0 1px 0 #d9a520; }
+#text .marked.tag-todo { background:#d8f0d8; box-shadow:0 1px 0 #5aa75a; }
 #notes textarea { width:100%; height:54px; font:13px -apple-system,sans-serif;
                   border:1px solid #ccc; border-radius:6px; padding:6px; }
 body.skim .speaking { opacity:1 !important; }
@@ -472,6 +477,13 @@ body.skim #text p span.lead { opacity:1; font-weight:500; }     /* topic sentenc
 body.skim #text p span.b { opacity:1; }                          /* author's own bold */
 body.skim #text h2 span, body.skim #text h3 span { opacity:1; }
 body.skim #text pre.code span { opacity:.75; }
+/* A highlight is never "background": skim's dimming must not eat it. Both
+   branches needed -- prose words live in <p>, code lines in <pre class=code>. */
+body.skim #text p span[data-w].marked,
+body.skim #text pre.code span[data-w].marked { opacity:1; }
+/* Karaoke has to stay visible on a word she has highlighted (it was already
+   losing to .marked on source order before today). */
+#text .marked.speaking { background:#ffe9a8; box-shadow:0 1px 0 #e0b93a; }
 
 /* the document's OWN emphasis, in every mode */
 .b { font-weight:700; }
@@ -513,9 +525,8 @@ document.addEventListener("DOMContentLoaded", () => {
   for (const b of document.querySelectorAll("#bar button[data-p]"))
     b.onclick = () => setProfile(b.dataset.p);
   for (const b of document.querySelectorAll(".speak"))
-    b.onclick = () => startFrom(+b.dataset.par);   // "start reading from here"
-  document.getElementById("play").onclick = () =>
-    tts.on ? stopTTS() : startFrom(tts.par || 0);
+    b.onclick = () => startFrom(parIndex(b));      // "start reading from here"
+  document.getElementById("play").onclick = () => tts.on ? stopTTS() : resumeTTS();
   fillVoiceMenu();
   document.getElementById("vtest").onclick = () => {
     speechSynthesis.cancel();
@@ -526,7 +537,7 @@ document.addEventListener("DOMContentLoaded", () => {
   };
   document.getElementById("voice").onchange = (e) => {
     localStorage.setItem("voice", e.target.value); publishPrefs();
-    if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }
+    restartHere();
   };
   document.getElementById("slower").onclick = () => bumpWpm(-15);
   document.getElementById("faster").onclick = () => bumpWpm(+15);
@@ -615,9 +626,11 @@ function toggleFocus(force){
 window.setPresence = function(state){
   window.__presence = state;
   if (state === "away"){
+    tts.paused = true;
     if (tts.on){ speechSynthesis.pause(); window.__ttsPaused = true; }
     nudge("Paused — take your time with your notes");
   } else if (state === "back"){
+    tts.paused = false;
     if (window.__ttsPaused){ speechSynthesis.resume(); window.__ttsPaused = false; }
     const here = document.querySelector(".here") || document.querySelector(".speaking");
     if (here){
@@ -859,8 +872,21 @@ document.addEventListener("keydown", (e) => {
 // One decision at the top, then it flows: paragraph n ends -> n+1 begins,
 // the page scrolls itself, and the spoken word is highlighted so eyes and
 // voice stay locked together. Default pace = the reader's measured wpm.
-const tts = { on:false, par:0, word:0,
+// tts.par + tts.word IS the position. Before, only the paragraph was kept, so
+// "resume" meant "say that whole paragraph again from the top" -- she could lose
+// sixty words she had already listened to. gen kills stale chains: cancel() makes
+// the dying utterance fire its handler, which used to queue the NEXT paragraph a
+// moment later and hijack whatever she had just started.
+const tts = { on:false, par:0, word:0, gen:0, paused:false,
               wpm:+(pref("wpm", DEFAULT_WPM)) };
+// one stop path for everyone. cancel() alone leaves an engine that the eye
+// tracker paused still paused, so the next speak() is silent under a lit button.
+function haltEngine(){
+  tts.gen += 1;
+  clearTimeout(tts.timer);
+  speechSynthesis.cancel();
+  if (!tts.paused) speechSynthesis.resume();
+}
 function publish(){                    // the recorder polls this and logs changes
   window.__tts = JSON.stringify({on:tts.on, wpm:tts.wpm});
   updateTTSUI();
@@ -872,14 +898,53 @@ function updateTTSUI(){
   document.getElementById("wpm").textContent = tts.wpm + " wpm";
 }
 function paragraphs(){ return [...document.querySelectorAll("#text p")]; }
+// The only way to name a paragraph is to ask the list the player actually walks.
+// A build-time index counted every block (headings and code blocks too), so on a
+// chapter with code EVERY speaker icon pointed somewhere else -- and the ones
+// past the end quietly navigated to the next chapter.
+function parIndex(el){ return paragraphs().indexOf(el.closest("p")); }
 function clearHi(){ for (const s of document.querySelectorAll(".speaking")) s.classList.remove("speaking"); }
-function stopTTS(){ tts.on = false; speechSynthesis.cancel(); clearHi(); publish(); }
+function stopTTS(){ tts.on = false; haltEngine(); clearHi(); publish(); }
+// resume from the word she was on, in the paragraph she was in -- unless she has
+// scrolled somewhere else entirely, in which case start from what she is looking at
+function resumePoint(){
+  const pars = paragraphs();
+  const stopped = pars[tts.par];
+  if (stopped){
+    // "still roughly where she left it" -- one screen of slack, because the
+    // karaoke scroll is animated and may still be settling when she hits stop.
+    const r = stopped.getBoundingClientRect();
+    const slack = window.innerHeight;
+    if (r.bottom > -slack && r.top < window.innerHeight + slack) return [tts.par, tts.word];
+  }
+  const here = currentPar();
+  const i = here ? pars.indexOf(here) : 0;
+  return [i < 0 ? 0 : i, 0];
+}
+function resumeTTS(){
+  const [i, w] = resumePoint();
+  // She pressed play herself, so she is plainly back at the page: clear the
+  // eye-tracker's "away" pause first, or speak() goes into a paused engine and
+  // she gets silence under a lit stop button.
+  tts.paused = false; window.__ttsPaused = false;
+  haltEngine(); tts.on = true; publish(); speakPar(i, w);
+}
+function restartHere(){          // voice or speed changed mid-sentence
+  if (!tts.on) return;
+  haltEngine(); speakPar(tts.par, tts.word);
+}
 function bumpWpm(d){
   tts.wpm = Math.min(320, Math.max(60, tts.wpm + d));
   localStorage.setItem("wpm", tts.wpm); publish(); publishPrefs();
-  if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }  // take effect now
+  restartHere();                                  // take effect from this word on
 }
-function startFrom(i){ tts.on = true; publish(); speechSynthesis.cancel(); speakPar(i); }
+function startFrom(i){
+  // Reject an index that is not a paragraph of THIS page: only the read-along
+  // chain itself may reach speakPar's end-of-chapter branch, which navigates.
+  if (!(i >= 0 && i < paragraphs().length)) { stopTTS(); return; }
+  tts.paused = false; window.__ttsPaused = false;   // an explicit start beats "away"
+  haltEngine(); tts.on = true; publish(); speakPar(i);
+}
 // macOS ships several voice tiers. The default is the flat robotic one; the
 // Siri / Premium / Enhanced voices are markedly more human. Pick the best
 // available once, and let the reader change it.
@@ -921,15 +986,19 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "ArrowRight" && (e.metaKey || e.altKey)) goNext();
 });
 
-function speakPar(i){
+function speakPar(i, startWord){
   const pars = paragraphs();
+  const myGen = tts.gen;
   if (!tts.on || i >= pars.length) {
     // finished the chapter while reading aloud -> roll straight into the next
-    if (tts.on && document.getElementById("next")) { goNext(); return; }
+    if (tts.on && i >= pars.length && document.getElementById("next")) { goNext(); return; }
     stopTTS(); return;
   }
   tts.par = i;
-  const spans = [...pars[i].querySelectorAll("span[data-w]")];
+  const all = [...pars[i].querySelectorAll("span[data-w]")];
+  const from = Math.max(0, Math.min(startWord || 0, Math.max(all.length - 1, 0)));
+  tts.word = from;
+  const spans = all.slice(from);
   // Speak one SENTENCE at a time. A whole paragraph in one utterance makes the
   // synthesiser run out of breath and flatten its intonation; sentence-sized
   // chunks let it shape each one, and the gaps land where a human would pause.
@@ -944,10 +1013,11 @@ function speakPar(i){
   u.pitch = 1.0;
   u.volume = 1.0;
   u.onboundary = (e) => {
+    if (myGen !== tts.gen) return;                 // a stale utterance talking
     if (e.name && e.name !== "word") return;
     let k = starts.findIndex(st => st > e.charIndex) - 1;
     if (k < -1+1 && starts[starts.length-1] <= e.charIndex) k = starts.length-1;
-    if (k >= 0) { clearHi(); spans[k].classList.add("speaking");
+    if (k >= 0) { clearHi(); tts.word = from + k; spans[k].classList.add("speaking");
                   if (document.body.classList.contains("focusing")){
                     for (const el of document.querySelectorAll(".here")) el.classList.remove("here");
                     pars[i].classList.add("here");     // spotlight follows the voice
@@ -960,7 +1030,12 @@ function speakPar(i){
   const tail = text.trim().slice(-1);
   const gap = tail === "." || tail === "!" || tail === "?" ? 480 :
               tail === ":" || tail === ";" ? 340 : 260;
-  u.onend = () => { if (tts.on) setTimeout(() => speakPar(i + 1), gap); };
+  u.onend = () => {
+    if (myGen !== tts.gen || !tts.on) return;      // cancelled: do NOT queue more
+    tts.timer = setTimeout(() => {
+      if (myGen === tts.gen && tts.on && !tts.paused) speakPar(i + 1, 0);
+    }, gap);
+  };
   speechSynthesis.speak(u);
 }
 """
@@ -1091,8 +1166,7 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
             if re.search(r"[.!?][\"\')]?$", w):
                 first_sentence = False
         speak = ("" if heading else
-                 f'<button class="speak" data-par="{len(body)}" '
-                 'title="read aloud from here">&#128264;</button>')
+                 '<button class="speak" title="read aloud from here">&#128264;</button>')
         body.append(f"<{tag}>" + speak + " ".join(words_html) + f"</{tag}>")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, os.path.basename(text_path) + ".adaptive.html")
