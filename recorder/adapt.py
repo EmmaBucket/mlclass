@@ -340,6 +340,11 @@ body { margin:0; background:var(--paper); color:var(--ink); }
         font:600 17px -apple-system,sans-serif; text-align:center; }
 #next small { display:block; font-weight:400; opacity:.85; margin-top:3px; font-size:13px; }
 #next:hover { filter:brightness(1.08); }
+figure.fig { margin:22px 0; text-align:center; }
+figure.fig img { max-width:100%; height:auto; border:1px solid #e6e0d8; border-radius:6px;
+                 background:#fff; padding:6px; }
+figure.fig figcaption { font:13px/1.5 -apple-system,sans-serif; color:#666; margin-top:6px; }
+body.skim figure.fig img { opacity:1; }
 pre.code { background:#f4f1ec; border:1px solid #e2ddd4; border-left:3px solid var(--accent);
            border-radius:6px; padding:10px 14px; overflow-x:auto; margin:14px 0; }
 pre.code code { font:14px/1.55 "SF Mono",Menlo,Consolas,monospace; white-space:pre;
@@ -432,6 +437,9 @@ body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow +
 #notes .del { position:absolute; right:0; top:8px; border:none; background:none;
               font-size:17px; color:#b03030; cursor:pointer; opacity:.45; line-height:1; }
 #notes .del:hover { opacity:1; }
+#clearmarks { margin-top:10px; font:12px -apple-system,sans-serif; padding:5px 10px;
+              border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer;
+              color:#b03030; }
 #focusbtn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 ::selection { background:#cfe8ff; }
 #notes .note b { display:block; color:#555; font-weight:600; }
@@ -550,8 +558,19 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("focusbtn").onclick = () => toggleFocus();
   document.getElementById("marks").onclick = () => showNotes();
   document.getElementById("noteclose").onclick = () => showNotes(false);
+  document.getElementById("clearmarks").onclick = () => {
+    if (!Object.keys(marks).length) return;
+    if (!confirm("Remove every highlight on this page?")) return;
+    for (const id of Object.keys(marks)) removeMark(id);
+  };
   for (const sp of document.querySelectorAll("#text span[data-w]"))
-    sp.onclick = () => markWord(sp);
+    sp.onclick = () => {                 // click a highlight to jump to its note
+      const id = sp.dataset.mark;
+      if (id === undefined) return;      // plain words do nothing: no accidental marks
+      showNotes(true);
+      const card = document.querySelector(`#notelist [data-note="${id}"] textarea`);
+      if (card) card.focus();
+    };
   restoreMarks();
   setupRecall();
   updateProgress();
@@ -696,6 +715,7 @@ setInterval(markHere, 1200);   // and while the voice reads and nothing else mov
 // and delete. Marks are stored as {id: {ws:[word ids], text, note, tag}} so a
 // highlight spanning twenty words is still ONE note, not twenty.
 const TAGS = ["question", "definition", "important", "todo"];
+let lastMark = null;
 let marks = JSON.parse(localStorage.getItem("marks") || "{}");
 // migrate the old one-word-per-note format
 for (const id of Object.keys(marks)) if (!marks[id].ws) marks[id].ws = [+id];
@@ -742,6 +762,8 @@ function addMark(spans){
   marks[id] = {ws, text: spans.map(sp => sp.innerText).join(" ").trim(), note: "", tag: null};
   paintMark(id);
   saveMarks();
+  lastMark = id;
+  nudge("Highlighted — press U to undo");
   return id;
 }
 // the sentence around a word, inside its own paragraph
@@ -765,7 +787,15 @@ function selectedSpans(){
   return [...host.querySelectorAll("span[data-w]")]
     .filter(sp => range.intersectsNode(sp));
 }
-document.addEventListener("mouseup", () => {
+// Where the press started, so a stray click or a double-click cannot become a
+// permanent highlight. Reading involves a lot of incidental clicking; before
+// this, every one of them left a coloured band in the text.
+let pressAt = null;
+document.addEventListener("mousedown", (e) => { pressAt = [e.clientX, e.clientY]; });
+document.addEventListener("mouseup", (e) => {
+  const dragged = pressAt && Math.hypot(e.clientX - pressAt[0], e.clientY - pressAt[1]) > 12;
+  pressAt = null;
+  if (!dragged) { window.getSelection().removeAllRanges(); return; }
   const spans = selectedSpans();
   if (spans.length){
     const id = addMark(spans);
@@ -861,6 +891,10 @@ document.addEventListener("keydown", (e) => {
     if (id !== undefined) nudge("Sentence highlighted — press N to write a note");
   }
   if (e.key === "n" || e.key === "N") showNotes();
+  if (e.key === "u" || e.key === "U"){
+    if (lastMark !== null && marks[lastMark]){ removeMark(lastMark); lastMark = null;
+      nudge("Highlight removed"); }
+  }
   if (e.key === "f" || e.key === "F") toggleFocus();
   if (e.key === "Escape"){
     if (document.body.classList.contains("focusing")) toggleFocus(false);
@@ -1100,6 +1134,23 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
             continue
         # (this used to strip # and ** as "noise" -- that was the bug that made
         # the adaptive page lose every heading and every bolded term)
+        # FIGURES: a plot is the point of a stats chapter. Rendered as a block,
+        # never word-spanned (there are no words to track inside a picture) and
+        # never read aloud; the caption stays trackable prose.
+        m_img = re.match(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$", par.strip())
+        if m_img:
+            alt, src = m_img.group(1), m_img.group(2)
+            cap = ""
+            if alt and alt.lower() not in ("figure", "image", "plot"):
+                cap_words = []
+                for w in alt.split():
+                    cap_words.append(f'<span data-w="{widx}">{html.escape(w)}</span>')
+                    widx += 1
+                cap = "<figcaption>" + " ".join(cap_words) + "</figcaption>"
+            body.append(f'<figure class="fig"><img src="{html.escape(src)}" '
+                        f'alt="{html.escape(alt)}">{cap}</figure>')
+            continue
+
         # headings keep their level; the author's own hierarchy IS the emphasis
         tag, heading = "p", 0
         m = re.match(r"^(#{1,3})\s+", par)
@@ -1215,6 +1266,8 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<option>definition</option><option>important</option>"
                  "<option>todo</option></select></div>"
                  "<div id='notelist'></div>"
-                 "<p style='color:#888;font-size:12px'>M marks the passage you are on "
-                 "&middot; N or Esc closes this panel</p></div></body></html>")
+                 "<p style='color:#888;font-size:12px'>Drag across text to highlight "
+                 "&middot; M takes the sentence you are on &middot; U undoes the last one "
+                 "&middot; N or Esc closes this panel</p>"
+                 "<button id='clearmarks'>clear all highlights</button></div></body></html>")
     return out

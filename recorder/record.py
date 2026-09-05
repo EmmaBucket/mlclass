@@ -594,6 +594,13 @@ def fetch_article_text(url):
             self.blocks, self.buf, self.keeping, self.skipping = [], [], 0, 0
 
         def handle_starttag(self, tag, attrs):
+            if tag == "img" and not self.skipping:
+                # figures are blocks of their own, not text inside a paragraph
+                src = dict(attrs).get("src", "")
+                alt = dict(attrs).get("alt", "figure")
+                if src:
+                    self.blocks.append(f"![{alt}]({src})")
+                return
             if tag in self.SKIP: self.skipping += 1
             elif tag in self.CODE and not self.skipping:
                 self.in_code = True; self.buf = []
@@ -603,7 +610,11 @@ def fetch_article_text(url):
             elif tag in self.EMPH and self.keeping and not self.skipping:
                 self.buf.append(" " + self.EMPH[tag])
 
+        def handle_startendtag(self, tag, attrs):
+            self.handle_starttag(tag, attrs)
+
         def handle_endtag(self, tag):
+            if tag == "img": return
             if tag in self.SKIP: self.skipping = max(0, self.skipping - 1)
             elif tag in self.CODE and getattr(self, "in_code", False):
                 self.in_code = False
@@ -672,17 +683,20 @@ def fetch_article_text(url):
               }
               return out;
             }
-            const blocks = [...document.querySelectorAll('p, h1, h2, h3, li, pre')]
+            const blocks = [...document.querySelectorAll('p, h1, h2, h3, li, pre, img')]
               .filter(el => !el.closest('nav, footer, aside, header'))
               .filter(el => !(el.tagName !== 'PRE' && el.closest('pre')))
               .map(el => {
+                if (el.tagName === 'IMG')            // plots, diagrams, figures
+                  return '![' + (el.alt || 'figure').replace(/[\\[\\]]/g, '') + '](' + el.src + ')';
                 if (el.tagName === 'PRE')
                   return '```\\n' + el.innerText.replace(/\\s+$/, '') + '\\n```';
                 const txt = markup(el).replace(/\\s+/g, ' ').trim();
                 const level = {H1: '# ', H2: '## ', H3: '### '}[el.tagName] || '';
                 return level + txt;
               })
-              .filter(t => t.startsWith('```') || t.startsWith('#') || t.split(' ').length >= 3);
+              .filter(t => t.startsWith('```') || t.startsWith('#') || t.startsWith('![')
+                           || t.split(' ').length >= 3);
             const n = document.querySelector('link[rel=next], a.navigation-next, a[rel=next]');
             return [blocks, n ? n.href : null];
         """)
@@ -690,6 +704,46 @@ def fetch_article_text(url):
         return "\n\n".join(blocks)
     finally:
         d.quit()
+
+
+def fetch_images(text, base_url, out_dir):
+    """Pull every figure into the local text folder and rewrite the links.
+
+    Remote links would work while online, but this page is a local file she may
+    reopen later or print into a study sheet, so the plots have to live here.
+    """
+    import hashlib
+    import urllib.parse
+    import urllib.request
+    img_dir = os.path.join(out_dir, "img")
+    os.makedirs(img_dir, exist_ok=True)
+    got = [0]
+
+    def grab(m):
+        alt, src = m.group(1), urllib.parse.urljoin(base_url, m.group(2))
+        if src.startswith("data:"):
+            return m.group(0)
+        ext = os.path.splitext(urllib.parse.urlparse(src).path)[1][:5] or ".png"
+        name = hashlib.sha1(src.encode()).hexdigest()[:16] + ext
+        path = os.path.join(img_dir, name)
+        if not os.path.exists(path):
+            try:
+                req = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0"})
+                data = urllib.request.urlopen(req, timeout=20).read()
+                if len(data) < 200:                    # spacer gif / tracking pixel
+                    return ""
+                with open(path, "wb") as fh:
+                    fh.write(data)
+            except Exception as e:
+                print(f"  (figure not fetched: {e})")
+                return ""
+        got[0] += 1
+        return f"![{alt}](img/{name})"
+
+    out = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", grab, text)
+    if got[0]:
+        print(f"  {got[0]} figure(s) saved with the chapter")
+    return out
 
 
 def build_chapter_chain(url, depth=3):
@@ -715,6 +769,7 @@ def build_chapter_chain(url, depth=3):
             break
         following = fetch_article_text.next_url
         if len(text.split()) >= 50:
+            text = fetch_images(text, nxt, tmp_dir)
             name = re.sub(r"[^\w.-]+", "_", nxt.split("//")[-1])[:60]
             src = os.path.join(tmp_dir, name + ".txt")
             with open(src, "w", encoding="utf-8") as fh:
@@ -988,7 +1043,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v21: your voice, speed and mode are remembered"
+RECORDER_VERSION = "v22: figures included; highlights only on a real drag"
 
 
 def main():
