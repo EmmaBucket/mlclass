@@ -740,11 +740,29 @@ def build_chapter_chain(url, depth=3):
         next_title = chapters[i + 1]["title"] if i + 1 < len(chapters) else None
         out = adapt.build_page(ch["src"], tmp_dir, wpm=pick_text.wpm,
                                model=resolve_text.model, profile=resolve_text.profile,
-                               next_href=next_href, next_title=next_title)
+                               next_href=next_href, next_title=next_title,
+                               prefs=resolve_text.prefs, density=resolve_text.density)
         built.insert(0, out)
     print(f"  adapted {len(built)} chapter(s); Next moves through them without leaving "
           f"the adaptive layout")
     return built
+
+
+def marking_density(conn, user_id, default=0.12):
+    """How much of a page to mark as 'hard'.
+
+    She reads more and more in focus mode, which shows no difficulty marks at
+    all. Rather than ignoring that, let it pull the marked share down: all-comfort
+    reading keeps 12% of words marked, all-focus reading settles at 4%, and
+    anything between interpolates. Her behaviour tunes the page, not a constant.
+    """
+    perf = db.profile_performance(conn, user_id)
+    total = sum(d["seconds"] for d in perf.values())
+    if total < 300:                       # under five minutes of evidence: leave it alone
+        return default
+    calm = (perf.get("focus", {}).get("seconds", 0)
+            + 0.5 * perf.get("skim", {}).get("seconds", 0)) / total
+    return round(0.12 - 0.08 * calm, 3)
 
 
 def favourite_profile(conn, user_id, default="comfort"):
@@ -765,7 +783,8 @@ def resolve_text(cfg):
         from recorder import adapt
         out = adapt.build_page(path, os.path.join(os.path.dirname(DB_PATH), "texts"),
                                wpm=pick_text.wpm, model=resolve_text.model,
-                               profile=resolve_text.profile)
+                               profile=resolve_text.profile, prefs=resolve_text.prefs,
+                               density=resolve_text.density)
         return "file://" + os.path.abspath(out), os.path.basename(path)
     url = cfg["url"]
     if cfg["kind"] == "url_adaptive":
@@ -969,7 +988,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v20: keeps the author's emphasis; PDF study sheets"
+RECORDER_VERSION = "v21: your voice, speed and mode are remembered"
 
 
 def main():
@@ -1051,7 +1070,14 @@ def main():
     pick_text.wpm = measured_wpm(conn, uid)
     from recorder import personalize
     resolve_text.model = personalize.load(conn, uid)      # None until enough data
-    resolve_text.profile = favourite_profile(conn, uid)
+    resolve_text.prefs = db.get_prefs(conn, uid)
+    resolve_text.profile = resolve_text.prefs.get("profile") or favourite_profile(conn, uid)
+    resolve_text.density = (resolve_text.prefs.get("mark_density")
+                            or marking_density(conn, uid))
+    p = resolve_text.prefs
+    print(f"your settings: mode {resolve_text.profile}, "
+          f"{p.get('wpm') or pick_text.wpm} wpm, voice {p.get('voice') or 'best available'}, "
+          f"marking {resolve_text.density:.0%} of words")
     if resolve_text.model:
         print(f"word difficulty: {resolve_text.model['weight_you']:.0%} learned from "
               f"your own reading ({resolve_text.model['n_words']:,} words)")
@@ -1099,6 +1125,7 @@ def main():
     tts_state = None               # read-along state, logged on every change
     marks_state = None             # marked passages + notes, mirrored to the db
     recall_state = None            # section summaries typed from memory
+    prefs_state = None             # voice / speed / mode, saved as she changes them
     page_href = browser.current_url  # watched so a chapter change remaps the words
     from collections import deque
     # (t_ms, hit) pairs evicted BY TIME, not by count. Counting frames made the
@@ -1142,11 +1169,19 @@ def main():
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
                         try:
-                            sy, prof, tts, marks, href, recall = browser.execute_script(
+                            (sy, prof, tts, marks, href, recall,
+                             prefs_json) = browser.execute_script(
                                 "return [(window.__mlScrollTop ? window.__mlScrollTop()"
                                 " : window.scrollY), window.__profile || null,"
                                 " window.__tts || null, window.__marks || null,"
-                                " location.href, window.__recall || null];")
+                                " location.href, window.__recall || null,"
+                                " window.__prefs || null];")
+                            if prefs_json and prefs_json != prefs_state:
+                                prefs_state = prefs_json
+                                try:
+                                    db.save_prefs(conn, uid, json.loads(prefs_json))
+                                except Exception:
+                                    pass
                             if recall != recall_state:
                                 recall_state = recall
                                 for item in json.loads(recall or "[]"):

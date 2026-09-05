@@ -270,6 +270,77 @@ def add_event(conn, session_id, t_ms, kind, value):
     conn.commit()
 
 
+DEFAULT_PREFS = {"wpm": None, "voice": None, "profile": None,
+                 "autofocus_off": 0, "hint_seen": 0, "mark_density": None}
+
+
+def get_prefs(conn, user_id):
+    """Reading preferences that must OUTLIVE the browser.
+
+    Selenium starts Chrome with a throwaway profile, so anything the page keeps
+    in localStorage (chosen voice, speed, reading mode) is gone by the next
+    session. Verified: set them, quit, relaunch -> all null. So they live here.
+    """
+    raw = get_setting(conn, f"prefs_user_{user_id}")
+    prefs = dict(DEFAULT_PREFS)
+    if raw:
+        try:
+            prefs.update(json.loads(raw))
+        except Exception:
+            pass
+    return prefs
+
+
+def save_prefs(conn, user_id, updates):
+    prefs = get_prefs(conn, user_id)
+    prefs.update({k: v for k, v in (updates or {}).items() if k in DEFAULT_PREFS})
+    set_setting(conn, f"prefs_user_{user_id}", json.dumps(prefs))
+    return prefs
+
+
+def profile_performance(conn, user_id):
+    """How the reader actually does in each reading mode.
+
+    Time spent is not the same as reading well: this pairs each profile stretch
+    with the words covered and the attention dips inside it, so 'which mode
+    should be the default' can be answered with evidence instead of a guess.
+    """
+    rows = conn.execute("""
+        SELECT e.session_id, e.t_ms, e.value, sm.duration_s
+        FROM events e JOIN sessions s USING(session_id)
+        LEFT JOIN session_summary sm ON sm.session_id = e.session_id
+        WHERE s.user_id = ? AND e.kind = 'profile' AND e.value IS NOT NULL
+        ORDER BY e.session_id, e.t_ms""", (user_id,)).fetchall()
+    out = {}
+    for i, (sid, t0, prof, dur) in enumerate(rows):
+        t1 = rows[i + 1][1] if i + 1 < len(rows) and rows[i + 1][0] == sid else (dur or 0) * 1000
+        if t1 <= t0:
+            continue
+        words = conn.execute("""
+            SELECT COUNT(DISTINCT word_index) FROM samples
+            WHERE session_id = ? AND t_ms BETWEEN ? AND ? AND word_index IS NOT NULL""",
+            (sid, t0, t1)).fetchone()[0]
+        on_text = conn.execute("""
+            SELECT AVG(CASE WHEN word_index IS NOT NULL THEN 1.0 ELSE 0 END)
+            FROM samples WHERE session_id = ? AND t_ms BETWEEN ? AND ? AND face_detected = 1""",
+            (sid, t0, t1)).fetchone()[0]
+        lows = conn.execute("""
+            SELECT COUNT(*) FROM events WHERE session_id = ? AND kind = 'attention'
+            AND value LIKE 'low%' AND t_ms BETWEEN ? AND ?""", (sid, t0, t1)).fetchone()[0]
+        d = out.setdefault(prof, {"seconds": 0.0, "words": 0, "on_text": [], "lows": 0})
+        d["seconds"] += (t1 - t0) / 1000.0
+        d["words"] += words or 0
+        if on_text is not None:
+            d["on_text"].append(on_text)
+        d["lows"] += lows
+    for prof, d in out.items():
+        mins = d["seconds"] / 60.0
+        d["wpm"] = (d["words"] / mins) if mins > 0.5 else None
+        d["on_text_pct"] = (sum(d["on_text"]) / len(d["on_text"])) if d["on_text"] else None
+        d["lows_per_10min"] = (d["lows"] / mins * 10) if mins > 0.5 else None
+    return out
+
+
 def known_devices(conn, user_id):
     """Device labels this user has recorded on before, most recent first."""
     return [r[0] for r in conn.execute("""

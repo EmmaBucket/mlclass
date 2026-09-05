@@ -20,6 +20,7 @@ gaze attribution keep working across all profiles.
 """
 import csv
 import html
+import json
 import math
 import os
 import re
@@ -78,6 +79,241 @@ def _tokenize(par):
     return out
 
 
+# ---------------------------------------------------------------------------
+# MATH.  The extracted text keeps the author's raw LaTeX -- \(\theta\) and
+# \[E(SSRT) = \beta_0 + \beta_1 * Age\].  Shown as-is that reads as
+# "backslash theta", and the read-along voice says it out loud letter by
+# letter.  We render it to real symbols at BUILD time, so it works offline
+# and prints into the PDF study sheets.
+#
+# Subscripts use <sub>, not Unicode subscript characters, because Unicode
+# simply has no subscript for most letters -- there is no subscript 'g', so
+# "SSRT_{negative}" cannot be spelled in Unicode at all.
+# ---------------------------------------------------------------------------
+_TEX_SYM = {
+    "alpha": ("α", "alpha"), "beta": ("β", "beta"),
+    "gamma": ("γ", "gamma"), "delta": ("δ", "delta"),
+    "epsilon": ("ε", "epsilon"), "varepsilon": ("ε", "epsilon"),
+    "zeta": ("ζ", "zeta"), "eta": ("η", "eta"),
+    "theta": ("θ", "theta"), "iota": ("ι", "iota"),
+    "kappa": ("κ", "kappa"), "lambda": ("λ", "lambda"),
+    "mu": ("μ", "mu"), "nu": ("ν", "nu"), "xi": ("ξ", "xi"),
+    "pi": ("π", "pi"), "rho": ("ρ", "rho"), "sigma": ("σ", "sigma"),
+    "tau": ("τ", "tau"), "upsilon": ("υ", "upsilon"),
+    "phi": ("φ", "phi"), "varphi": ("φ", "phi"), "chi": ("χ", "chi"),
+    "psi": ("ψ", "psi"), "omega": ("ω", "omega"),
+    "Gamma": ("Γ", "capital gamma"), "Delta": ("Δ", "delta"),
+    "Theta": ("Θ", "capital theta"), "Lambda": ("Λ", "capital lambda"),
+    "Xi": ("Ξ", "capital xi"), "Pi": ("Π", "the product of"),
+    "Sigma": ("Σ", "the sum of"), "Phi": ("Φ", "capital phi"),
+    "Psi": ("Ψ", "capital psi"), "Omega": ("Ω", "omega"),
+    "times": ("×", "times"), "cdot": ("·", "times"),
+    "div": ("÷", "divided by"), "pm": ("±", "plus or minus"),
+    "mp": ("∓", "minus or plus"),
+    "leq": ("≤", "is less than or equal to"),
+    "le": ("≤", "is less than or equal to"),
+    "geq": ("≥", "is greater than or equal to"),
+    "ge": ("≥", "is greater than or equal to"),
+    "neq": ("≠", "is not equal to"), "ne": ("≠", "is not equal to"),
+    "approx": ("≈", "is about"), "sim": ("~", "is distributed as"),
+    "propto": ("∝", "is proportional to"),
+    "equiv": ("≡", "is equivalent to"), "infty": ("∞", "infinity"),
+    "partial": ("∂", "partial"), "sum": ("∑", "the sum of"),
+    "prod": ("∏", "the product of"), "int": ("∫", "the integral of"),
+    "to": ("→", "goes to"), "rightarrow": ("→", "goes to"),
+    "leftarrow": ("←", "comes from"), "ldots": ("…", "and so on"),
+    "dots": ("…", "and so on"), "cdots": ("⋯", "and so on"),
+    "in": ("∈", "is in"), "notin": ("∉", "is not in"),
+    "forall": ("∀", "for all"), "exists": ("∃", "there exists"),
+    "ell": ("ℓ", "ell"), "%": ("%", "percent"), "&": ("&", "and"),
+    "$": ("$", "dollar"), "#": ("#", "hash"), "_": ("_", "underscore"),
+    "{": ("{", ""), "}": ("}", ""),
+    "quad": (" ", " "), "qquad": ("  ", " "), ",": (" ", " "), ";": (" ", " "),
+    ":": (" ", " "), "!": ("", ""), " ": (" ", " "),
+    "left": ("", ""), "right": ("", ""), "displaystyle": ("", ""),
+    "limits": ("", ""), "nonumber": ("", ""), "notag": ("", ""),
+}
+_TEX_ACCENT = {"hat": "̂", "widehat": "̂", "bar": "̄",
+               "overline": "̄", "tilde": "̃", "widetilde": "̃",
+               "vec": "⃗", "dot": "̇", "ddot": "̈",
+               "check": "̌", "acute": "́", "grave": "̀"}
+_ACCENT_SAY = {"hat": "{} hat", "widehat": "{} hat", "bar": "{} bar",
+               "overline": "{} bar", "tilde": "{} tilde", "widetilde": "{} tilde",
+               "vec": "vector {}", "dot": "{} dot", "ddot": "{} double dot",
+               "check": "{} check", "acute": "{} acute", "grave": "{} grave"}
+_TEX_FONT = {"text", "textrm", "textbf", "textit", "mathrm", "mathbf", "mathit",
+             "mathsf", "mathcal", "mathbb", "mathfrak", "operatorname",
+             "boldsymbol", "bm", "rm", "bf", "it"}
+_OP_SAY = {"=": "equals", "+": "plus", "-": "minus", "*": "times", "/": "over",
+           "<": "is less than", ">": "is greater than", "|": "given"}
+_DIGIT = {"0": "zero", "1": "one", "2": "two", "3": "three", "4": "four",
+          "5": "five", "6": "six", "7": "seven", "8": "eight", "9": "nine"}
+# Scripts are <sub>/<sup> tags, NOT the Unicode subscript block. Two reasons,
+# both checked on a rendered page: Unicode has no subscript for most letters
+# (there is no subscript "g", so "SSRT_{negative}" cannot be spelled at all),
+# and the serif faces a maths run is set in carry no U+2080 glyphs -- Chrome
+# falls back to a full-size character, so "\beta_0" came out looking like the
+# word "beta-oh". A real <sub> renders correctly in every face.
+
+
+def _say_script(src, spoken, kind):
+    """How a sub/superscript is read aloud: beta_1 is 'beta one', not 'beta
+    underscore one'; sigma^2 is 'sigma squared', not 'sigma hat two'."""
+    src = src.strip()
+    if kind == "sup":
+        if src == "2":
+            return " squared "
+        if src == "3":
+            return " cubed "
+        if src in ("T", "⊤"):
+            return " transpose "
+        if src == "-1":
+            return " inverse "
+        return " to the power " + spoken + " "
+    if len(src) == 1 and src in _DIGIT:
+        return " " + _DIGIT[src] + " "
+    return " " + spoken + " "
+
+
+def render_math(tex):
+    """One TeX fragment -> (html, spoken).
+
+    html  keeps every glyph inside the caller's single span[data-w], so gaze
+          attribution is unchanged: one visual token, one tracked span.
+    spoken is what the read-along voice says, so a Greek letter is a WORD.
+    """
+    i, n = 0, len(tex)
+    out, say = [], []
+
+    def arg(j):
+        """Read one TeX argument at j: a {group}, a \\macro, or a single char."""
+        while j < n and tex[j] == " ":
+            j += 1
+        if j >= n:
+            return "", j
+        if tex[j] == "{":
+            depth, k = 1, j + 1
+            while k < n and depth:
+                if tex[k] == "{":
+                    depth += 1
+                elif tex[k] == "}":
+                    depth -= 1
+                k += 1
+            return tex[j + 1:k - 1], k
+        if tex[j] == "\\":
+            k = j + 1
+            while k < n and tex[k].isalpha():
+                k += 1
+            k = max(k, j + 2)
+            return tex[j:k], k
+        return tex[j], j + 1
+
+    while i < n:
+        c = tex[i]
+        if c == "\\":
+            k = i + 1
+            while k < n and tex[k].isalpha():
+                k += 1
+            name = tex[i + 1:k] if k > i + 1 else tex[i + 1:i + 2]
+            if not name:
+                i += 1
+                continue
+            if k == i + 1:
+                k = i + 2
+            if name in ("frac", "dfrac", "tfrac"):
+                a, k = arg(k)
+                b, k = arg(k)
+                ah, asay = render_math(a)
+                bh, bsay = render_math(b)
+                wrap = lambda s, h: h if len(s.strip()) <= 1 else "(" + h + ")"
+                out.append(wrap(a, ah) + "⁄" + wrap(b, bh))
+                say.append(" " + asay + " over " + bsay + " ")
+            elif name == "sqrt":
+                a, k = arg(k)
+                ah, asay = render_math(a)
+                out.append("√(" + ah + ")")
+                say.append(" the square root of " + asay + " ")
+            elif name in _TEX_ACCENT:
+                a, k = arg(k)
+                ah, asay = render_math(a)
+                out.append(ah + _TEX_ACCENT[name])
+                say.append(" " + _ACCENT_SAY[name].format(asay.strip()) + " ")
+            elif name in _TEX_FONT:
+                a, k = arg(k)
+                ah, asay = render_math(a)
+                out.append(ah)
+                say.append(asay)
+            elif name in _TEX_SYM:
+                glyph, word = _TEX_SYM[name]
+                out.append(html.escape(glyph))
+                if word.strip():
+                    say.append(" " + word + " ")
+            else:
+                # unknown macro: show and say its NAME. Never a backslash.
+                out.append(html.escape(name))
+                say.append(" " + name + " ")
+            i = k
+            continue
+        if c in "_^":
+            a, i2 = arg(i + 1)
+            ah, asay = render_math(a)
+            kind = "sub" if c == "_" else "sup"
+            out.append(f"<{kind}>{ah}</{kind}>")
+            say.append(_say_script(a, asay, kind))
+            i = i2
+            continue
+        if c in "{}":
+            i += 1
+            continue
+        if c == " ":
+            out.append(" ")
+            i += 1
+            continue
+        out.append(html.escape(c))
+        if c in _OP_SAY:
+            say.append(" " + _OP_SAY[c] + " ")
+        elif c == "(":
+            # E(SSRT) reads as "E of SSRT"; a bare bracket is just a breath
+            prev = "".join(say).strip()
+            say.append(" of " if prev and prev[-1].isalnum()
+                       and len(prev.split()[-1]) <= 6 else ", ")
+        elif c == ")":
+            say.append(" ")
+        else:
+            say.append(c)
+        i += 1
+
+    frag = "".join(out).strip()
+    spoken = re.sub(r"\s+", " ", "".join(say)).strip()
+    spoken = re.sub(r"\s+([,.])", r"\1", spoken)
+    return frag, spoken
+
+
+# \(inline\) and \[display\] math, pulled out BEFORE the paragraph is split on
+# whitespace. This is the other half of the bug: "\[E(SSRT) = \beta_0\]" has
+# spaces in it, so word-splitting tore one equation into four junk "words".
+_MATH_RE = re.compile(r"\\\[(.+?)\\\]|\\\((.+?)\\\)", re.S)
+# An R name that lost its backticks still deserves the code look; a URL, a bare
+# "=" and a brace in ordinary prose do not.
+_CODEISH = re.compile(r"\w_\w|\w=|=\w|\$\w|\w\(")
+_NOT_CODE = re.compile(r"^[(\[‘“\"]*https?://|[{}]")
+_SENT = "\x01"                    # placeholder: no whitespace, no markdown chars
+_SENT_RE = re.compile(r"^(\W*)\x01(\d+)\x01(\W*)$")
+
+
+def _protect_math(par):
+    """Replace each math region with a placeholder that survives .split().
+    Returns (paragraph, [(tex, is_display), ...])."""
+    store = []
+
+    def grab(m):
+        display = m.group(1) is not None
+        store.append(((m.group(1) if display else m.group(2)).strip(), display))
+        return f"{_SENT}{len(store) - 1}{_SENT}"
+
+    return _MATH_RE.sub(grab, par), store
+
+
 def _state_line(model):
     """One line telling the reader how much of this page is tuned to them."""
     if not model:
@@ -111,8 +347,21 @@ pre.code code { font:14px/1.55 "SF Mono",Menlo,Consolas,monospace; white-space:p
 pre.code .cl { display:block; }
 /* code keeps its own look in every reading mode */
 body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opacity:1; }
-.math { font-family:"SF Mono",Menlo,monospace; letter-spacing:normal !important;
-        background:#f6f4ef; padding:0 2px; border-radius:3px; }
+/* Rendered maths: real symbols, so it reads as notation and not as code.
+   NOT Georgia: Georgia sets old-style figures, which draw a subscript "0" at
+   x-height -- "beta nought" came out looking like the word "beta-oh". Cambria
+   and Times use lining figures, and lining-nums forces them everywhere. */
+.math, .mathdisp { font-family:Cambria,"Times New Roman",Times,serif;
+        font-style:italic; font-variant-numeric:lining-nums;
+        font-feature-settings:"lnum" 1;
+        letter-spacing:normal !important; word-spacing:normal !important; }
+.math { white-space:nowrap; }
+.math sub, .math sup, .mathdisp sub, .mathdisp sup {
+        font-style:normal; font-size:.66em; line-height:0;
+        font-variant-numeric:lining-nums; font-feature-settings:"lnum" 1; }
+/* display equations get their own line, centred, the way the book prints them */
+.mathdisp { display:block; text-align:center; margin:16px 0; font-size:1.15em; }
+body.skim #text p span.math, body.skim #text p span.mathdisp { opacity:1; }
 #nextbar { margin-left:8px; }
 #profile { font:13px -apple-system,sans-serif; text-decoration:none; color:var(--accent);
            border:1px solid #d6c9e6; border-radius:16px; padding:7px 12px; }
@@ -236,9 +485,26 @@ body.skim #text pre.code span { opacity:.75; }
 
 JS = """
 const PROFILES = ["comfort","focus","skim"];
-window.__profile = localStorage.getItem("profile") || DEFAULT_PROFILE;
+function pref(key, fallback){
+  // PREFS comes from the database (survives the browser); localStorage is just
+  // this window's copy. Chrome is launched with a throwaway profile every
+  // session, so localStorage alone forgets everything between readings.
+  const v = localStorage.getItem(key);
+  if (v !== null && v !== "") return v;
+  return (PREFS && PREFS[key] !== null && PREFS[key] !== undefined) ? PREFS[key] : fallback;
+}
+function publishPrefs(){
+  window.__prefs = JSON.stringify({
+    wpm: tts.wpm,
+    voice: localStorage.getItem("voice") || (PREFS && PREFS.voice) || null,
+    profile: window.__profile,
+    autofocus_off: pref("autofocus_off", 0) ? 1 : 0,
+    hint_seen: pref("hint_seen", 0) ? 1 : 0,
+  });
+}
+window.__profile = pref("profile", DEFAULT_PROFILE);
 function setProfile(p){
-  window.__profile = p; localStorage.setItem("profile", p);
+  window.__profile = p; localStorage.setItem("profile", p); publishPrefs();
   document.body.className = p;
   for (const b of document.querySelectorAll("#bar button[data-p]"))
     b.classList.toggle("on", b.dataset.p === p);
@@ -259,7 +525,7 @@ document.addEventListener("DOMContentLoaded", () => {
     u.rate = tts.wpm / 180; speechSynthesis.speak(u);
   };
   document.getElementById("voice").onchange = (e) => {
-    localStorage.setItem("voice", e.target.value);
+    localStorage.setItem("voice", e.target.value); publishPrefs();
     if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }
   };
   document.getElementById("slower").onclick = () => bumpWpm(-15);
@@ -281,10 +547,11 @@ document.addEventListener("DOMContentLoaded", () => {
   markHere();
   if (localStorage.getItem("focusing")) setFocusing(true);
   const hint = document.getElementById("hint");
-  if (localStorage.getItem("hint_seen")) hint.style.display = "none";
+  if (pref("hint_seen", 0)) hint.style.display = "none";
   document.getElementById("hintx").onclick = () => {
-    hint.style.display = "none"; localStorage.setItem("hint_seen", "1");
+    hint.style.display = "none"; localStorage.setItem("hint_seen", "1"); publishPrefs();
   };
+  publishPrefs();
 });
 
 // ---------------- attention, progress, recall ----------------
@@ -336,7 +603,7 @@ function toggleFocus(force){
   setFocusing(on);
   if (!on){
     // a manual exit is a decision: do not let the tracker override it again
-    localStorage.setItem("autofocus_off", "1");
+    localStorage.setItem("autofocus_off", "1"); publishPrefs();
     nudge("Focus mode off — it will stay off");
   }
 }
@@ -592,8 +859,8 @@ document.addEventListener("keydown", (e) => {
 // One decision at the top, then it flows: paragraph n ends -> n+1 begins,
 // the page scrolls itself, and the spoken word is highlighted so eyes and
 // voice stay locked together. Default pace = the reader's measured wpm.
-const tts = { on:false, par:0,
-              wpm:+(localStorage.getItem("wpm") || DEFAULT_WPM) };
+const tts = { on:false, par:0, word:0,
+              wpm:+(pref("wpm", DEFAULT_WPM)) };
 function publish(){                    // the recorder polls this and logs changes
   window.__tts = JSON.stringify({on:tts.on, wpm:tts.wpm});
   updateTTSUI();
@@ -609,7 +876,7 @@ function clearHi(){ for (const s of document.querySelectorAll(".speaking")) s.cl
 function stopTTS(){ tts.on = false; speechSynthesis.cancel(); clearHi(); publish(); }
 function bumpWpm(d){
   tts.wpm = Math.min(320, Math.max(60, tts.wpm + d));
-  localStorage.setItem("wpm", tts.wpm); publish();
+  localStorage.setItem("wpm", tts.wpm); publish(); publishPrefs();
   if (tts.on) { speechSynthesis.cancel(); speakPar(tts.par); }  // take effect now
 }
 function startFrom(i){ tts.on = true; publish(); speechSynthesis.cancel(); speakPar(i); }
@@ -619,7 +886,7 @@ function startFrom(i){ tts.on = true; publish(); speechSynthesis.cancel(); speak
 function bestVoice(){
   const vs = speechSynthesis.getVoices().filter(v => v.lang.startsWith("en"));
   if (!vs.length) return null;
-  const saved = localStorage.getItem("voice");
+  const saved = pref("voice", null);
   if (saved) { const hit = vs.find(v => v.name === saved); if (hit) return hit; }
   const rank = v => (/siri/i.test(v.name) ? 0 :
                      /premium|enhanced|natural|neural/i.test(v.name) ? 1 :
@@ -667,7 +934,10 @@ function speakPar(i){
   // synthesiser run out of breath and flatten its intonation; sentence-sized
   // chunks let it shape each one, and the gaps land where a human would pause.
   let text = "", starts = [];
-  for (const sp of spans) { starts.push(text.length); text += sp.innerText + " "; }
+  // data-say carries the spoken form of rendered maths, so the voice says
+  // "beta one", not the letter shapes and not "backslash b e t a".
+  for (const sp of spans) { starts.push(text.length);
+                            text += (sp.dataset.say || sp.innerText) + " "; }
   const u = new SpeechSynthesisUtterance(text);
   const v = bestVoice(); if (v) u.voice = v;
   u.rate = tts.wpm / 180;                        // rate 1.0 ~ 180 wpm
@@ -697,7 +967,7 @@ function speakPar(i){
 
 
 def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
-               next_href=None, next_title=None):
+               next_href=None, next_title=None, prefs=None, density=0.12):
     """text/markdown file -> adaptive html page. Returns the output path.
     wpm: the reader's own measured pace (recorder computes it from their
     best-calibrated sessions); becomes the read-along default speed."""
@@ -734,8 +1004,9 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
             continue
         prose_words += [w for w in re.sub(r"[*`#]", "", par).split()]
     scores = sorted(hardness(w, model) for w in prose_words if len(w) > 2) or [0.6, 0.75]
-    cut_hard = scores[int(0.88 * (len(scores) - 1))]
-    cut_very = scores[int(0.96 * (len(scores) - 1))]
+    d = min(0.30, max(0.02, density))          # share of words to mark at all
+    cut_hard = scores[int((1 - d) * (len(scores) - 1))]
+    cut_very = scores[int((1 - d / 3) * (len(scores) - 1))]
 
     widx = 0
     body = []
@@ -765,10 +1036,42 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
         words_html = []
         first_sentence = True          # skim mode leans on topic sentences
         par = re.sub(r"(?<!\*)\*(?!\*)\s*$", "", par)      # dangling emphasis markers
+        # lift \(...\) and \[...\] out before the whitespace split, so an
+        # equation containing spaces stays one thing
+        par, mathstore = _protect_math(par)
         for j, (w, style) in enumerate(_tokenize(par)):
-            # math stays exactly as written: \(x^2\), $\alpha$, 3.14e-8
-            if re.match(r"^(\\\(|\\\[|\$|\\begin)", w) or re.search(r"[=^_{}\\]", w):
-                words_html.append(f'<span data-w="{widx}" class="math">{html.escape(w)}</span>')
+            sent = _SENT_RE.match(w)
+            if sent:
+                lead, idx, trail = sent.group(1), int(sent.group(2)), sent.group(3)
+                tex, display = mathstore[idx]
+                frag, spoken = render_math(tex)
+                cls = "mathdisp" if display else "math"
+                # keep the sentence-final "." on the spoken form: speakPar sizes
+                # the pause between paragraphs from the last character it says
+                spoken = (spoken + trail).strip()
+                # one span[data-w] per visual token, exactly as before: the
+                # symbols live INSIDE it, so gaze attribution is untouched.
+                words_html.append(
+                    f'<span data-w="{widx}" class="{cls}" '
+                    f'data-say="{html.escape(spoken, quote=True)}">'
+                    f'{html.escape(lead)}{frag}{html.escape(trail)}</span>')
+                widx += 1
+                continue
+            # Leftover TeX that never closed its delimiter: still render it,
+            # so a stray "\beta" is never shown to her as a backslash.
+            if re.match(r"^\\[\(\[]|^\\[A-Za-z]", w):
+                frag, spoken = render_math(re.sub(r"^\\[\(\[]|\\[\)\]]$", "", w))
+                words_html.append(f'<span data-w="{widx}" class="math" '
+                                  f'data-say="{html.escape(spoken, quote=True)}">'
+                                  f'{frag}</span>')
+                widx += 1
+                continue
+            # An R name that lost its backticks ("Age_centred", "na.rm=T)") is
+            # code, not maths. It used to get the maths style purely because it
+            # contains "_" or "=" -- and so did a bare "=", a URL and "{childhood".
+            if _CODEISH.search(w) and not _NOT_CODE.search(w):
+                words_html.append(
+                    f'<span data-w="{widx}" class="codeword">{html.escape(w)}</span>')
                 widx += 1
                 continue
             w = w.strip("*`")                       # unbalanced marker, never show it
@@ -802,7 +1105,8 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
         fh.write("<!doctype html><html><head><meta charset='utf-8'>"
                  f"<title>{html.escape(os.path.basename(text_path))}</title>"
                  f"<style>{CSS}</style><script>const DEFAULT_WPM={int(wpm)};"
-                 f"const DEFAULT_PROFILE={profile!r};{JS}</script></head>"
+                 f"const DEFAULT_PROFILE={profile!r};"
+                 f"const PREFS={json.dumps(prefs or {})};{JS}</script></head>"
                  f"<body class='{profile}'>"
                  "<div id='bar'><span id='brand'>&#128065; Adaptive Reading</span>"
                  "<b style='font:14px -apple-system'>mode:</b>"

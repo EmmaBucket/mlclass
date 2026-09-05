@@ -138,6 +138,26 @@ def build(user_id=1):
                        "and your answers double as comprehension ground truth, which the "
                        "eye data alone can never give you.</p>")
 
+    perf = _db.profile_performance(conn, user_id)
+    if perf:
+        rows_p = ""
+        for prof, d in sorted(perf.items(), key=lambda kv: -kv[1]["seconds"]):
+            wpm = f"{d['wpm']:.0f}" if d["wpm"] else "-"
+            ot = f"{d['on_text_pct']:.0%}" if d["on_text_pct"] is not None else "-"
+            lows = f"{d['lows_per_10min']:.1f}" if d["lows_per_10min"] is not None else "-"
+            rows_p += (f"<tr><td><b>{prof}</b></td><td>{d['seconds']/60:.0f} min</td>"
+                       f"<td>{wpm} words/min</td><td>{ot} on text</td>"
+                       f"<td>{lows} attention dips / 10 min</td></tr>")
+        perf_html = ("<table><tr><th>mode</th><th>time</th><th>coverage</th>"
+                     "<th>gaze on text</th><th>drift</th></tr>" + rows_p + "</table>"
+                     "<p class='caveat'>Careful with this one: you choose the mode, so the "
+                     "comparison is not an experiment. If you switch to focus for the hard "
+                     "passages, focus will look slower even if it helps. To settle it, read "
+                     "one chapter in one mode and the next chapter in the other on the same "
+                     "day, and compare those pairs.</p>")
+    else:
+        perf_html = ("<p class='caveat'>No mode switches recorded yet.</p>")
+
     notes = conn.execute("""
         SELECT n.session_id, n.quote, n.note FROM notes n JOIN sessions s USING(session_id)
         WHERE s.user_id = ? ORDER BY n.note_id DESC LIMIT 25""", (user_id,)).fetchall()
@@ -206,6 +226,9 @@ calibration to mean anything.</p>
 
 <h2>Which reading mode holds you longest</h2>
 <table>{prof_html}</table>
+
+<h2>How you read in each mode</h2>
+{perf_html}
 
 <h2>Attention and recall</h2>
 {focus_html}
