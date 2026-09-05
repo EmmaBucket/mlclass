@@ -58,6 +58,26 @@ def hardness(word, model=None):
     return 1 / (1 + math.exp(-logit))
 
 
+def _tokenize(par):
+    """Split a paragraph into (word, style) pairs, where style comes from the
+    ORIGINAL document: **bold**, *italic*, `code`. Word-level granularity keeps
+    every word individually gaze-trackable while still looking like the source."""
+    out = []
+    for chunk in re.split(r"(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`)", par):
+        if not chunk:
+            continue
+        if chunk.startswith("**") and chunk.endswith("**"):
+            style, text = "b", chunk[2:-2]
+        elif chunk.startswith("*") and chunk.endswith("*") and len(chunk) > 2:
+            style, text = "i", chunk[1:-1]
+        elif chunk.startswith("`") and chunk.endswith("`"):
+            style, text = "codeword", chunk[1:-1]
+        else:
+            style, text = "", chunk
+        out += [(w, style) for w in text.split()]
+    return out
+
+
 def _state_line(model):
     """One line telling the reader how much of this page is tuned to them."""
     if not model:
@@ -182,21 +202,36 @@ body.comfort #text { max-width:34rem; font:22px/1.9 "Atkinson Hyperlegible",Verd
 body.comfort p { margin:0 0 1.4em; }
 body.comfort .h2 { letter-spacing:.045em; font-weight:600; }
 body.comfort .h3 { letter-spacing:.09em; font-weight:700; background:#efe8f7; border-radius:3px; }
+body.comfort .b { background:#fff3cd; padding:0 2px; border-radius:3px; }
 
 /* FOCUS: the deep-reading block. Uniform, calm, minimal signalling -- dense on
-   purpose; only the very hardest words get a nudge. */
+   purpose. Difficulty marks are switched OFF here; only the author's own
+   emphasis survives, so nothing competes with the argument. */
 body.focus #text { max-width:44rem; font:19px/1.65 Georgia,serif; }
 body.focus p { margin:0 0 1.1em; }
-body.focus .h3 { letter-spacing:.05em; }
+body.focus .h2, body.focus .h3 { letter-spacing:normal; font-weight:inherit;
+                                 background:none; }
 
-/* SKIM: typographic differentiation for cascading. First words of each
-   paragraph bolded, hard words dimmed LESS than easy ones -- the skeleton
-   stands out, the reader's eye can rappel down it. */
+/* SKIM: the page's SKELETON. Topic sentence of each paragraph stays full
+   strength, the rest recedes; headings and the author's own bold stay loud.
+   (This used to bold the first two words of every paragraph, which cut
+   sentences mid-phrase and read as random highlighting.) */
 body.skim #text { max-width:38rem; font:19px/1.75 -apple-system,sans-serif; }
 body.skim p { margin:0 0 1.3em; }
-body.skim .lead { font-weight:700; }
-body.skim span[data-w] { opacity:.62; }
-body.skim .lead, body.skim .h2, body.skim .h3 { opacity:1; }
+body.skim #text p span[data-w] { opacity:.4; }
+body.skim #text p span.lead { opacity:1; font-weight:500; }     /* topic sentence */
+body.skim #text p span.b { opacity:1; }                          /* author's own bold */
+body.skim #text h2 span, body.skim #text h3 span { opacity:1; }
+body.skim #text pre.code span { opacity:.75; }
+
+/* the document's OWN emphasis, in every mode */
+.b { font-weight:700; }
+.i { font-style:italic; }
+.codeword { font-family:"SF Mono",Menlo,monospace; font-size:.92em; background:#f2efe9;
+            padding:0 3px; border-radius:3px; letter-spacing:normal !important; }
+#text h2 { font-size:1.35em; margin:1.6em 0 .5em; line-height:1.3; }
+#text h3 { font-size:1.12em; margin:1.3em 0 .4em; line-height:1.35; }
+#text h2 span[data-w], #text h3 span[data-w] { letter-spacing:normal; }
 """
 
 JS = """
@@ -689,6 +724,19 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
     if buf: parts.append("\n".join(buf))
     paragraphs = [p for p in parts if p.strip()]
 
+    # ADAPTIVE THRESHOLD: mark the hardest ~12% of THIS document's words rather
+    # than everything over a fixed score. As the personal model learns, which
+    # words fall in that 12% changes -- but the amount of marking stays steady,
+    # so a dense chapter is not a sea of highlights and an easy one is not bare.
+    prose_words = []
+    for par in paragraphs:
+        if par.lstrip().startswith("```"):
+            continue
+        prose_words += [w for w in re.sub(r"[*`#]", "", par).split()]
+    scores = sorted(hardness(w, model) for w in prose_words if len(w) > 2) or [0.6, 0.75]
+    cut_hard = scores[int(0.88 * (len(scores) - 1))]
+    cut_very = scores[int(0.96 * (len(scores) - 1))]
+
     widx = 0
     body = []
     for par in paragraphs:
@@ -704,25 +752,45 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                 widx += 1
             body.append("<pre class='code'><code>" + "\n".join(rendered) + "</code></pre>")
             continue
-        # light markdown: strip #/##/** noise but keep the text
-        par = re.sub(r"^#{1,6}\s*", "", par)
-        par = par.replace("**", "").replace("__", "")
+        # (this used to strip # and ** as "noise" -- that was the bug that made
+        # the adaptive page lose every heading and every bolded term)
+        # headings keep their level; the author's own hierarchy IS the emphasis
+        tag, heading = "p", 0
+        m = re.match(r"^(#{1,3})\s+", par)
+        if m:
+            heading = len(m.group(1))
+            tag = {1: "h2", 2: "h2", 3: "h3"}[heading]
+            par = par[m.end():]
+
         words_html = []
-        for j, w in enumerate(par.split()):
+        first_sentence = True          # skim mode leans on topic sentences
+        par = re.sub(r"(?<!\*)\*(?!\*)\s*$", "", par)      # dangling emphasis markers
+        for j, (w, style) in enumerate(_tokenize(par)):
             # math stays exactly as written: \(x^2\), $\alpha$, 3.14e-8
             if re.match(r"^(\\\(|\\\[|\$|\\begin)", w) or re.search(r"[=^_{}\\]", w):
                 words_html.append(f'<span data-w="{widx}" class="math">{html.escape(w)}</span>')
                 widx += 1
                 continue
-            h = hardness(w, model)
-            cls = ["lead"] if j < 2 else []          # skim skeleton: first 2 words
-            if h > 0.75: cls.append("h3")            # hardest: spacing + mark
-            elif h > 0.6: cls.append("h2")           # hard: spacing + weight
-            words_html.append(f'<span data-w="{widx}"{" class=" + chr(34) + " ".join(cls) + chr(34) if cls else ""}>{html.escape(w)}</span>')
+            w = w.strip("*`")                       # unbalanced marker, never show it
+            if not w:
+                continue
+            cls = []
+            if style: cls.append(style)             # b / i / codeword from the source
+            if first_sentence and not heading: cls.append("lead")
+            if not style and not heading:
+                h = hardness(w, model)
+                if h >= cut_very: cls.append("h3")
+                elif h >= cut_hard: cls.append("h2")
+            words_html.append(
+                f'<span data-w="{widx}"' + (f' class="{" ".join(cls)}"' if cls else "")
+                + f'>{html.escape(w)}</span>')
             widx += 1
-        body.append(f'<p><button class="speak" data-par="{len(body)}" '
-                    'title="read aloud from here">&#128264;</button>'
-                    + " ".join(words_html) + "</p>")
+            if re.search(r"[.!?][\"\')]?$", w):
+                first_sentence = False
+        speak = ("" if heading else
+                 f'<button class="speak" data-par="{len(body)}" '
+                 'title="read aloud from here">&#128264;</button>')
+        body.append(f"<{tag}>" + speak + " ".join(words_html) + f"</{tag}>")
     os.makedirs(out_dir, exist_ok=True)
     out = os.path.join(out_dir, os.path.basename(text_path) + ".adaptive.html")
     nav = ""

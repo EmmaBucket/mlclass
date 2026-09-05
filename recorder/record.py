@@ -586,6 +586,8 @@ def fetch_article_text(url):
         KEEP = {"p", "h1", "h2", "h3", "li"}
         CODE = {"pre"}                      # code and console output: keep verbatim
         SKIP = {"script", "style", "nav", "footer", "header", "aside"}
+        EMPH = {"strong": "**", "b": "**", "em": "*", "i": "*", "code": "`"}
+        LEVEL = {"h1": "# ", "h2": "## ", "h3": "### "}
 
         def __init__(self):
             super().__init__(convert_charrefs=True)
@@ -597,6 +599,9 @@ def fetch_article_text(url):
                 self.in_code = True; self.buf = []
             elif tag in self.KEEP and not self.skipping and not getattr(self, "in_code", False):
                 self.keeping += 1
+                self.level = self.LEVEL.get(tag, "")
+            elif tag in self.EMPH and self.keeping and not self.skipping:
+                self.buf.append(" " + self.EMPH[tag])
 
         def handle_endtag(self, tag):
             if tag in self.SKIP: self.skipping = max(0, self.skipping - 1)
@@ -607,12 +612,18 @@ def fetch_article_text(url):
                     # fenced, so the page builder can render it as untouched code
                     self.blocks.append("```\n" + code + "\n```")
                 self.buf = []
+            elif tag in self.EMPH and self.keeping:
+                self.buf.append(self.EMPH[tag] + " ")
             elif tag in self.KEEP and self.keeping:
                 self.keeping -= 1
                 text = " ".join("".join(self.buf).split())
-                if len(text.split()) >= 3:        # drop menu crumbs
-                    self.blocks.append(text)
+                # keep natural spacing around markers: squeezing them made
+                # "the **console** (the" render as "the**console**(the"
+                text = re.sub(r"\s{2,}", " ", text)
+                if len(text.split()) >= 3 or getattr(self, "level", ""):
+                    self.blocks.append(getattr(self, "level", "") + text)
                 self.buf = []
+                self.level = ""
 
         def handle_data(self, data):
             if getattr(self, "in_code", False) and not self.skipping:
@@ -642,13 +653,36 @@ def fetch_article_text(url):
         blocks, nxt = d.execute_script("""
             // keep code/output blocks verbatim and IN ORDER with the prose --
             // a programming textbook is unreadable without them
+            // Keep the author's own emphasis. A textbook bolds the terms that
+            // matter; stripping that throws away the writer's own difficulty
+            // signal, which is better than anything we can infer.
+            function markup(el){
+              let out = '';
+              for (const n of el.childNodes){
+                if (n.nodeType === 3) out += n.nodeValue;
+                else if (n.nodeType === 1){
+                  const inner = markup(n).trim();
+                  if (!inner) continue;
+                  const t = n.tagName;
+                  if (t === 'STRONG' || t === 'B') out += ' **' + inner + '** ';
+                  else if (t === 'EM' || t === 'I') out += ' *' + inner + '* ';
+                  else if (t === 'CODE') out += ' `' + inner + '` ';
+                  else out += markup(n);
+                }
+              }
+              return out;
+            }
             const blocks = [...document.querySelectorAll('p, h1, h2, h3, li, pre')]
               .filter(el => !el.closest('nav, footer, aside, header'))
               .filter(el => !(el.tagName !== 'PRE' && el.closest('pre')))
-              .map(el => el.tagName === 'PRE'
-                    ? '```\\n' + el.innerText.replace(/\\s+$/, '') + '\\n```'
-                    : el.innerText.trim().replace(/\\s+/g, ' '))
-              .filter(t => t.startsWith('```') || t.split(' ').length >= 3);
+              .map(el => {
+                if (el.tagName === 'PRE')
+                  return '```\\n' + el.innerText.replace(/\\s+$/, '') + '\\n```';
+                const txt = markup(el).replace(/\\s+/g, ' ').trim();
+                const level = {H1: '# ', H2: '## ', H3: '### '}[el.tagName] || '';
+                return level + txt;
+              })
+              .filter(t => t.startsWith('```') || t.startsWith('#') || t.split(' ').length >= 3);
             const n = document.querySelector('link[rel=next], a.navigation-next, a[rel=next]');
             return [blocks, n ? n.href : null];
         """)
@@ -935,7 +969,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v19: scroll fix, note-taking aware, data-quality gate"
+RECORDER_VERSION = "v20: keeps the author's emphasis; PDF study sheets"
 
 
 def main():
@@ -1248,9 +1282,15 @@ def main():
         want = ask("Your notes", f"You marked {n_notes} passage(s).\n\n"
                    "Save them as a file you can keep? (y/n)")
         if (want or "").strip().lower().startswith("y"):
-            from recorder import export_notes
+            from recorder import export_notes, notes_pdf
             path = export_notes.export_session(conn, sid)
             print(f"notes saved: {path}")
+            try:
+                pdf = notes_pdf.export_pdf(conn, sid)
+                if pdf:
+                    print(f"study sheet: {pdf}")
+            except Exception as e:
+                print(f"(could not build the PDF study sheet: {e})")
         else:
             print("notes kept in the database only "
                   "(python3 recorder/export_notes.py to save them later)")
