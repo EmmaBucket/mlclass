@@ -184,6 +184,42 @@ def build(user_id=1):
                        "general reading model. It needs at least 150 words from sessions "
                        "calibrated under 150px.</p>")
 
+    prefs = _db.get_prefs(conn, user_id)
+    typo = prefs.get("typo") or {}
+    rows_t = ""
+    for mode in ("comfort", "focus", "skim"):
+        t = typo.get(mode) or {}
+        if t:
+            parts = [f"{k} {v}" for k, v in t.items()]
+            rows_t += f"<tr><td><b>{mode}</b></td><td>{', '.join(parts)}</td></tr>"
+    n_layout = conn.execute("""SELECT COUNT(*) FROM events e JOIN sessions s USING(session_id)
+                               WHERE s.user_id=? AND e.kind='layout'""", (user_id,)).fetchone()[0]
+    adapt_html = (
+        "<table><tr><th>what</th><th>how it adapts</th></tr>"
+        f"<tr><td>which words are marked</td><td>your own dwell data, refit after every "
+        f"well-calibrated session ({pm['weight_you']:.0%} you)</td></tr>" if pm else
+        "<table><tr><th>what</th><th>how it adapts</th></tr>"
+        "<tr><td>which words are marked</td><td>general model until you have enough tracked reading</td></tr>")
+    adapt_html += (
+        f"<tr><td>how many words are marked</td><td>follows your mode usage &mdash; more time in "
+        f"Focus means a calmer Comfort</td></tr>"
+        f"<tr><td>read-along speed</td><td>your measured pace, then whatever you set "
+        f"({prefs.get('wpm') or 'measured'} wpm)</td></tr>"
+        f"<tr><td>default mode, voice, theme</td><td>remembered: {prefs.get('profile') or 'most used'}, "
+        f"{prefs.get('voice') or 'best available'}, {prefs.get('theme') or 'auto'}</td></tr>"
+        f"<tr><td>type size, spacing, line length</td><td>{'your own settings per mode (below)' if rows_t else 'the mode defaults &mdash; press T while reading to change them'}</td></tr>"
+        "</table>")
+    if rows_t:
+        adapt_html += "<table>" + rows_t + "</table>"
+    adapt_html += (
+        "<p class='caveat'><b>What this deliberately does not do:</b> it does not run experiments on "
+        "your typography behind your back. We looked hard at doing that, and the honest conclusion "
+        "was that a webcam cannot measure the thing a font change moves (word-level gaze error here "
+        "is 90&ndash;140 px against 18&ndash;42 px lines), so any automatic 'this layout is better' "
+        "verdict would be noise wearing a confidence interval. What it does instead is keep every "
+        "setting you choose, log every change, and show you here what you actually keep. "
+        f"Layout changes re-measured so far: {n_layout}.</p>")
+
     good = [s for s in ss if (s["calib"] or 999) < GOOD_CALIB]
     html = f"""<!doctype html><html><head><meta charset="utf-8">
 <title>{name}'s reading account</title><style>
@@ -209,6 +245,9 @@ th {{ color:#666; font-weight:600; }}
 
 <h2>How personalised your pages are</h2>
 {pstate_html}
+
+<h2>What adapts, and what you set yourself</h2>
+{adapt_html}
 
 <h2>Every session</h2>
 <table><tr><th>#</th><th>when</th><th>felt</th><th>screen</th><th>calib</th><th>length</th>

@@ -211,16 +211,60 @@ def set_setting(conn, key, value):
     conn.commit()
 
 
-def last_calibration(conn, user_id, device_label, max_error=150):
-    """Most recent trustworthy calibration for this user on this device, or None.
-    Lets a returning reader skip the dots -- with the drift risk on record."""
-    return conn.execute("""
+def last_calibration(conn, user_id, device_label, max_error=150,
+                     screen_w=None, screen_h=None):
+    """Most recent trustworthy calibration for this user on this SCREEN, or None.
+
+    Keyed on pixel geometry as well as the device nickname: a mapping fitted on
+    a 2560x1440 monitor is nonsense on a 1440x900 laptop, even if both were
+    called 'monitor' in the form (that is exactly what happened in sessions 26
+    and 27, which read 0.9% on-text under a 'good' 139 px error)."""
+    geo = ""
+    args = [user_id, device_label, max_error]
+    if screen_w and screen_h:
+        geo = " AND screen_w = ? AND screen_h = ?"
+        args += [screen_w, screen_h]
+    return conn.execute(f"""
         SELECT session_id, calibration, calib_error, started_at
         FROM sessions
         WHERE user_id = ? AND device_label = ? AND calibration IS NOT NULL
-              AND calib_error IS NOT NULL AND calib_error < ?
-        ORDER BY started_at DESC LIMIT 1""",
-        (user_id, device_label, max_error)).fetchone()
+              AND calib_error IS NOT NULL AND calib_error < ?{geo}
+              AND COALESCE(data_quality, '') = ''
+        ORDER BY started_at DESC LIMIT 1""", args).fetchone()
+
+
+def flag_calibration_mismatch(conn):
+    """Sessions whose reused calibration came from a different screen size."""
+    flagged = []
+    rows = conn.execute("""SELECT session_id, notes, screen_w, screen_h FROM sessions
+                           WHERE notes LIKE 'calibration reused from session %'""").fetchall()
+    for sid, note, w, h in rows:
+        # walk back to the session where the dots were actually shown: a
+        # mapping reused from a reused mapping still belongs to the original
+        # screen (session 27 inherited 26, which had inherited a 2560x1440 fit)
+        src, hops = sid, 0
+        while hops < 12:
+            row = conn.execute("SELECT notes FROM sessions WHERE session_id=?", (src,)).fetchone()
+            n2 = (row[0] or "") if row else ""
+            if not n2.startswith("calibration reused from session "):
+                break
+            try:
+                src = int(n2.split("session")[1].split()[0]); hops += 1
+            except Exception:
+                break
+        if src == sid:
+            continue
+        sw, sh = conn.execute("SELECT screen_w, screen_h FROM sessions WHERE session_id=?",
+                              (src,)).fetchone() or (None, None)
+        if sw and w and (sw != w or sh != h):
+            cur = conn.execute("SELECT COALESCE(data_quality,'') FROM sessions WHERE session_id=?",
+                               (sid,)).fetchone()[0]
+            if "calib_mismatch" not in cur:
+                newq = ",".join(x for x in [cur, "calib_mismatch"] if x)
+                conn.execute("UPDATE sessions SET data_quality=? WHERE session_id=?", (newq, sid))
+                flagged.append(sid)
+    conn.commit()
+    return flagged
 
 
 def save_notes(conn, session_id, items):
@@ -257,11 +301,12 @@ def flag_data_quality(conn, session_id):
 
 
 def backfill_data_quality(conn):
-    """Apply the quality check to sessions recorded before the check existed."""
+    """Apply the quality checks to sessions recorded before the checks existed."""
     flagged = []
     for (sid,) in conn.execute("SELECT session_id FROM sessions WHERE data_quality IS NULL"):
         if flag_data_quality(conn, sid):
             flagged.append(sid)
+    flagged += flag_calibration_mismatch(conn)
     return flagged
 
 
@@ -271,7 +316,8 @@ def add_event(conn, session_id, t_ms, kind, value):
 
 
 DEFAULT_PREFS = {"wpm": None, "voice": None, "profile": None,
-                 "autofocus_off": 0, "hint_seen": 0, "mark_density": None}
+                 "autofocus_off": 0, "hint_seen": 0, "mark_density": None,
+                 "theme": "auto", "typo": None}
 
 
 def get_prefs(conn, user_id):

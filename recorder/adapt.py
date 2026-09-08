@@ -325,37 +325,179 @@ def _state_line(model):
 
 
 CSS = """
-:root { --ink:#1a1a1a; --paper:#faf8f4; --accent:#7a5c96; }
-body { margin:0; background:var(--paper); color:var(--ink); }
-#bar { position:sticky; top:0; background:var(--paper); border-bottom:1px solid #ddd;
-       padding:10px 16px; display:flex; gap:8px; align-items:center; z-index:9; }
-#bar button { font:15px/1 -apple-system,sans-serif; padding:8px 14px; border:1px solid #bbb;
-              border-radius:16px; background:white; cursor:pointer; }
-#bar button.on { background:var(--accent); color:white; border-color:var(--accent); }
-#brand { font:700 15px -apple-system,sans-serif; color:var(--accent); margin-right:6px; }
-#pstate { background:#efe8f7; color:#4b3b60; padding:6px 16px;
-          font:12.5px -apple-system,sans-serif; border-bottom:1px solid #e0d3ef; }
-#next { display:block; margin:40px auto 80px; max-width:34rem; padding:16px 20px;
-        background:var(--accent); color:#fff; border-radius:12px; text-decoration:none;
-        font:600 17px -apple-system,sans-serif; text-align:center; }
-#next small { display:block; font-weight:400; opacity:.85; margin-top:3px; font-size:13px; }
-#next:hover { filter:brightness(1.08); }
-figure.fig { margin:22px 0; text-align:center; }
-figure.fig img { max-width:100%; height:auto; border:1px solid #e6e0d8; border-radius:6px;
-                 background:#fff; padding:6px; }
-figure.fig figcaption { font:13px/1.5 -apple-system,sans-serif; color:#666; margin-top:6px; }
-body.skim figure.fig img { opacity:1; }
-pre.code { background:#f4f1ec; border:1px solid #e2ddd4; border-left:3px solid var(--accent);
-           border-radius:6px; padding:10px 14px; overflow-x:auto; margin:14px 0; }
+/* ===== TOKENS. Every colour on the page comes from here, so dark mode is a
+   second block rather than a second stylesheet. Contrast ratios (WCAG, computed
+   not asserted) are noted; warm off-white, never pure white on pure black. ===== */
+:root {
+  --bg:#FBF7F0; --surface:#FFFCF5; --sunken:#F1EBE0;
+  --ink:#3D3732;        /* 10.98:1 on bg */
+  --ink-muted:#6E6357;  /*  5.48:1 */
+  --ink-dim:#726A61;    /*  4.98:1  skim body text (opacity .4 was 2.49:1) */
+  --ink-ghost:#C6BFB6;  /*  1.71:1  focus spotlight, deliberately faint */
+  --line:#E0D8CB; --line-strong:#9C8D7B;
+  --accent:#6B4A8F; --on-accent:#FFFCF5;
+  --accent-soft:#EFE7F6; --on-accent-soft:#4A356A;
+  --code-bg:#F1EBE0; --code-ink:#4A423A;
+  --fig-plate:#FFFFFF;
+  --hl:#BED9EC;            --hl-edge:#1E79B9;
+  --hl-note:#B4E0BC;       --hl-note-edge:#268539;
+  --hl-question:#F3CBD2;   --hl-question-edge:#DC2A47;
+  --hl-definition:#D9D1EF; --hl-definition-edge:#7D5FD5;
+  --hl-important:#F2D287;  --hl-important-edge:#986C06;
+  --hl-todo:#B4E0BC;       --hl-todo-edge:#268539;
+  --speak:#F7CA35; --on-speak:#3D3732;
+  --emph:#FBEBB8;          /* the author's bold, comfort mode */
+  --rail:#6B4A8F; --rail-track:#E9E1D4;
+  --select:#CFE0F0;
+  --danger:#B03030; --ok:#2E7D32;
+  --shadow:0 2px 10px rgba(61,55,50,.10);
+  --nudge-bg:#4B3B60; --nudge-ink:#FFFCF5;
+}
+:root[data-theme="dark"] {
+  --bg:#1C1B19; --surface:#262421; --sunken:#141311;
+  --ink:#D4CEC5; --ink-muted:#999182; --ink-dim:#958C7E; --ink-ghost:#4A453E;
+  --line:#35322D; --line-strong:#777066;
+  --accent:#B79BDA; --on-accent:#1C1B19;
+  --accent-soft:#2C2440; --on-accent-soft:#C9B6E4;
+  --code-bg:#141311; --code-ink:#C3BCB0;
+  --fig-plate:#E8E4DC;
+  --hl:#243642;            --hl-edge:#2E87C6;
+  --hl-note:#233928;       --hl-note-edge:#339346;
+  --hl-question:#50282E;   --hl-question-edge:#DD4F67;
+  --hl-definition:#372F50; --hl-definition-edge:#8A71D6;
+  --hl-important:#3E3218;  --hl-important-edge:#A6790D;
+  --hl-todo:#233928;       --hl-todo-edge:#339346;
+  --speak:#E8C64A; --on-speak:#1C1B19;
+  --emph:#3E3218;
+  --rail:#B79BDA; --rail-track:#302D29;
+  --select:#2A3D4C;
+  --danger:#E06B6B; --ok:#6FBF73;
+  --shadow:0 2px 10px rgba(0,0,0,.45);
+  --nudge-bg:#C9B6E4; --nudge-ink:#1C1B19;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#1C1B19; --surface:#262421; --sunken:#141311;
+    --ink:#D4CEC5; --ink-muted:#999182; --ink-dim:#958C7E; --ink-ghost:#4A453E;
+    --line:#35322D; --line-strong:#777066;
+    --accent:#B79BDA; --on-accent:#1C1B19;
+    --accent-soft:#2C2440; --on-accent-soft:#C9B6E4;
+    --code-bg:#141311; --code-ink:#C3BCB0;
+    --fig-plate:#E8E4DC;
+    --hl:#243642;            --hl-edge:#2E87C6;
+    --hl-note:#233928;       --hl-note-edge:#339346;
+    --hl-question:#50282E;   --hl-question-edge:#DD4F67;
+    --hl-definition:#372F50; --hl-definition-edge:#8A71D6;
+    --hl-important:#3E3218;  --hl-important-edge:#A6790D;
+    --hl-todo:#233928;       --hl-todo-edge:#339346;
+    --speak:#E8C64A; --on-speak:#1C1B19;
+    --emph:#3E3218;
+    --rail:#B79BDA; --rail-track:#302D29;
+    --select:#2A3D4C;
+    --danger:#E06B6B; --ok:#6FBF73;
+    --shadow:0 2px 10px rgba(0,0,0,.45);
+    --nudge-bg:#C9B6E4; --nudge-ink:#1C1B19;
+  }
+}
+
+/* ===== TYPOGRAPHY IS DATA. Each mode sets defaults; the reader's own
+   adjustments override them (set as inline custom properties by JS and stored
+   in the database). Measure is in ch -- CHARACTERS -- because "34rem" against a
+   16px root silently gave comfort mode 38 characters per line for weeks.
+   Defaults were MEASURED on rendered lines (Georgia's ch runs narrow):
+   comfort 62ch = 62 chars/line, focus 58ch = ~72, skim 56ch = ~67. ===== */
+body.comfort { --size:22px; --lead:1.9; --measure:62ch; --wsp:.16em; --lsp:0;
+               --font:"Atkinson Hyperlegible",Verdana,sans-serif; --pgap:1.4em; }
+body.focus   { --size:19px; --lead:1.65; --measure:58ch; --wsp:normal; --lsp:0;
+               --font:Georgia,serif; --pgap:1.1em; }
+body.skim    { --size:19px; --lead:1.75; --measure:56ch; --wsp:normal; --lsp:0;
+               --font:-apple-system,system-ui,sans-serif; --pgap:1.3em; }
+
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+       transition:background .18s linear, color .18s linear; }
+::selection { background:var(--select); color:var(--ink); }
+
+/* ---- toolbar ---- */
+#bar { position:sticky; top:0; z-index:9; display:flex; align-items:center; gap:10px;
+       padding:8px 14px; background:var(--surface); border-bottom:1px solid var(--line);
+       font:15px/1 -apple-system,system-ui,sans-serif; }
+#brand { font:700 14px -apple-system,sans-serif; color:var(--accent); white-space:nowrap;
+         margin-right:4px; }
+#modes { display:inline-flex; background:var(--sunken); border:1px solid var(--line);
+         border-radius:11px; padding:2px; }
+#modes button { appearance:none; border:0; background:none; color:var(--ink-muted);
+                font:600 14px/1 -apple-system,sans-serif; padding:8px 14px; border-radius:9px;
+                cursor:pointer; min-height:34px; }
+#modes button:hover { color:var(--ink); }
+#modes button.on { background:var(--accent); color:var(--on-accent); box-shadow:var(--shadow); }
+#bar button, #bar .ctl { font:14px/1 -apple-system,sans-serif; min-height:34px; padding:0 12px;
+              border:1px solid var(--line-strong); border-radius:11px; background:var(--surface);
+              color:var(--ink); cursor:pointer; display:inline-flex; align-items:center; gap:5px; }
+#bar button:hover, #bar .ctl:hover { background:var(--sunken); }
+#bar button.on { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+#bar button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+#modes button { border:0; min-height:30px; }
+#rbar { margin-left:auto; display:flex; align-items:center; gap:8px;
+        font:14px -apple-system,sans-serif; }
+#pace { display:inline-flex; align-items:center; border:1px solid var(--line-strong);
+        border-radius:11px; overflow:hidden; background:var(--surface); min-height:34px; }
+#pace button { border:0; border-radius:0; min-height:32px; width:32px; padding:0;
+               justify-content:center; font-size:17px; }
+#wpm { min-width:64px; text-align:center; font:13px -apple-system,sans-serif;
+       color:var(--ink-muted); border-inline:1px solid var(--line); padding:0 6px; }
+#rbar select { font:13px -apple-system,sans-serif; padding:6px 8px; border-radius:11px;
+               border:1px solid var(--line-strong); background:var(--surface); color:var(--ink);
+               max-width:140px; min-height:34px; }
+#play.on { background:var(--ok); color:#fff; border-color:var(--ok); }
+#focusbtn.on { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+#theme, #textbtn { padding:0 10px; }
+#profile { font:13px -apple-system,sans-serif; text-decoration:none; color:var(--accent);
+           border:1px solid var(--line-strong); border-radius:11px; padding:0 12px;
+           min-height:34px; display:inline-flex; align-items:center; }
+#profile:hover { background:var(--sunken); }
+#nextbar { margin-left:8px; }
+
+/* ---- status + hint strips ---- */
+#pstate { background:var(--accent-soft); color:var(--on-accent-soft); padding:6px 16px;
+          font:12.5px -apple-system,sans-serif; border-bottom:1px solid var(--line); }
+#hint { background:var(--accent-soft); color:var(--on-accent-soft); border-bottom:1px solid var(--line);
+        padding:10px 16px; font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px;
+        align-items:center; }
+#hint .h3 { padding:0 3px; }
+#hint button { margin-left:auto; border:none; background:none; cursor:pointer;
+               font-size:15px; opacity:.6; color:inherit; }
+
+/* ---- the reading surface ---- */
+#text { margin:32px auto; padding:0 24px; max-width:var(--measure);
+        font:var(--size)/var(--lead) var(--font);
+        word-spacing:var(--wsp); letter-spacing:var(--lsp);
+        text-align:left; hyphens:none; }
+#text p { margin:0 0 var(--pgap); }
+p { position:relative; }
+.speak { position:absolute; left:-34px; top:2px; border:none; background:none;
+         cursor:pointer; font-size:15px; opacity:.35; color:var(--ink-muted); }
+.speak:hover { opacity:1; }
+#text h2 { font-size:1.35em; margin:1.6em 0 .5em; line-height:1.3; }
+#text h3 { font-size:1.12em; margin:1.3em 0 .4em; line-height:1.35; }
+#text h2 span[data-w], #text h3 span[data-w] { letter-spacing:normal; }
+
+/* the document's OWN emphasis, in every mode */
+.b { font-weight:700; }
+.i { font-style:italic; }
+.codeword { font-family:"SF Mono",Menlo,monospace; font-size:.92em; background:var(--code-bg);
+            color:var(--code-ink); padding:0 3px; border-radius:3px; letter-spacing:normal !important; }
+
+/* code blocks: never restyled, never re-spaced, never read aloud */
+pre.code { background:var(--code-bg); color:var(--code-ink); border:1px solid var(--line);
+           border-left:3px solid var(--accent); border-radius:6px; padding:10px 14px;
+           overflow-x:auto; margin:14px 0; }
 pre.code code { font:14px/1.55 "SF Mono",Menlo,Consolas,monospace; white-space:pre;
                 letter-spacing:normal !important; word-spacing:normal !important; }
 pre.code .cl { display:block; }
-/* code keeps its own look in every reading mode */
 body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opacity:1; }
-/* Rendered maths: real symbols, so it reads as notation and not as code.
-   NOT Georgia: Georgia sets old-style figures, which draw a subscript "0" at
-   x-height -- "beta nought" came out looking like the word "beta-oh". Cambria
-   and Times use lining figures, and lining-nums forces them everywhere. */
+
+/* rendered maths: lining figures so a subscript 0 is not mistaken for an o */
 .math, .mathdisp { font-family:Cambria,"Times New Roman",Times,serif;
         font-style:italic; font-variant-numeric:lining-nums;
         font-feature-settings:"lnum" 1;
@@ -364,143 +506,112 @@ body.skim pre.code .cl, body.comfort pre.code .cl, body.focus pre.code .cl { opa
 .math sub, .math sup, .mathdisp sub, .mathdisp sup {
         font-style:normal; font-size:.66em; line-height:0;
         font-variant-numeric:lining-nums; font-feature-settings:"lnum" 1; }
-/* display equations get their own line, centred, the way the book prints them */
 .mathdisp { display:block; text-align:center; margin:16px 0; font-size:1.15em; }
 body.skim #text p span.math, body.skim #text p span.mathdisp { opacity:1; }
-#nextbar { margin-left:8px; }
-#profile { font:13px -apple-system,sans-serif; text-decoration:none; color:var(--accent);
-           border:1px solid #d6c9e6; border-radius:16px; padding:7px 12px; }
-#profile:hover { background:#efe8f7; }
-/* focus spotlight: everything except the passage you are on recedes.
-   Used manually (F) and automatically when attention drops. */
+
+/* figures: white plates so the plot's own colours survive dark mode */
+figure.fig { margin:22px 0; text-align:center; }
+figure.fig img { max-width:100%; height:auto; border:1px solid var(--line); border-radius:6px;
+                 background:var(--fig-plate); padding:6px; }
+figure.fig figcaption { font:13px/1.5 -apple-system,sans-serif; color:var(--ink-muted); margin-top:6px; }
+body.skim figure.fig img { opacity:1; }
+
+/* next chapter */
+#next { display:block; margin:40px auto 80px; max-width:var(--measure); padding:16px 20px;
+        background:var(--accent); color:var(--on-accent); border-radius:12px; text-decoration:none;
+        font:600 17px -apple-system,sans-serif; text-align:center; }
+#next small { display:block; font-weight:400; opacity:.85; margin-top:3px; font-size:13px; }
+#next:hover { filter:brightness(1.08); }
+
+/* focus spotlight, progress, presence */
 body.focusing #text p, body.focusing #text pre { opacity:.28; transition:opacity .5s; }
 body.focusing #text p.here, body.focusing #text pre.here { opacity:1; }
 #text p.here { box-shadow:-14px 0 0 -11px var(--accent); }
-/* where you left off when you looked away to write */
 .resume { animation:resumeflash 2.4s ease-out 1; }
-@keyframes resumeflash { 0% { background:#ffe9a8; } 100% { background:transparent; } }
-#rail { position:fixed; left:0; top:0; height:3px; background:var(--accent);
+@keyframes resumeflash { 0% { background:var(--speak); } 100% { background:transparent; } }
+#rail { position:fixed; left:0; top:0; height:3px; background:var(--rail);
         width:0; z-index:30; transition:width .3s; }
 #left { position:fixed; right:14px; bottom:12px; font:12px -apple-system,sans-serif;
-        color:#7a6a8c; background:#fffffff0; padding:5px 10px; border-radius:12px;
-        border:1px solid #e6dcf0; z-index:12; }
-.recall { margin:26px auto; max-width:34rem; background:#fff; border:1px solid #e0d3ef;
-          border-left:4px solid var(--accent); border-radius:10px; padding:14px 16px;
-          font:15px/1.5 -apple-system,sans-serif; }
+        color:var(--ink-muted); background:var(--surface); padding:5px 10px; border-radius:12px;
+        border:1px solid var(--line); z-index:12; }
+.recall { margin:26px auto; max-width:var(--measure); background:var(--surface);
+          border:1px solid var(--line); border-left:4px solid var(--accent); border-radius:10px;
+          padding:14px 16px; font:15px/1.5 -apple-system,sans-serif; color:var(--ink); }
 .recall b { display:block; margin-bottom:6px; }
-.recall textarea { width:100%; height:52px; border:1px solid #ccc; border-radius:6px;
-                   padding:6px; font:14px -apple-system,sans-serif; }
-.recall .done { color:#2e7d32; font-size:13px; }
+.recall textarea { width:100%; height:52px; border:1px solid var(--line-strong); border-radius:6px;
+                   padding:6px; font:14px -apple-system,sans-serif; background:var(--surface);
+                   color:var(--ink); }
+.recall .done { color:var(--ok); font-size:13px; }
 .nudge { position:fixed; left:50%; transform:translateX(-50%); bottom:26px; z-index:40;
-         background:#4b3b60; color:#fff; padding:10px 16px; border-radius:20px;
-         font:14px -apple-system,sans-serif; box-shadow:0 4px 16px rgba(0,0,0,.2); }
-#hint { background:#f3ecfb; border-bottom:1px solid #e0d3ef; padding:10px 16px;
-        font:14px/1.5 -apple-system,sans-serif; display:flex; gap:10px; align-items:center; }
-#hint .h3 { padding:0 3px; }
-#hint button { margin-left:auto; border:none; background:none; cursor:pointer;
-               font-size:15px; opacity:.5; }
-#text { margin:32px auto; padding:0 24px; }
-p { position:relative; }
-.speak { position:absolute; left:-34px; top:2px; border:none; background:none;
-         cursor:pointer; font-size:15px; opacity:.35; }
-.speak:hover { opacity:1; }
-#rbar { margin-left:auto; display:flex; gap:6px; align-items:center;
-        font:14px -apple-system,sans-serif; }
-#rbar button { border-radius:8px; padding:6px 10px; }
-#rbar select { font:13px -apple-system,sans-serif; padding:5px; border-radius:8px;
-               border:1px solid #bbb; background:white; max-width:140px; }
-#play.on { background:#2e7d32; color:white; border-color:#2e7d32; }
-.speaking { background:#ffe9a8; border-radius:3px; }
-/* Scoped under #text so a highlight WINS the cascade. A bare `.marked` lost its
-   background to `.codeword` (same specificity, declared later) and to
-   `body.comfort .h3` / `.b` and `body.focus .h2,.h3` (0-2-1) -- which punched
-   holes in every highlight at exactly the code, bold and hard words: the ones
-   most worth highlighting. That is the "only highlighting part of it" bug. */
-#text .marked { background:#d7f0ff; box-shadow:0 1px 0 #67b7e6; border-radius:2px; }
-#text .marked.hasnote { background:#c9e8c9; box-shadow:0 1px 0 #5aa75a; }
-/* sits BELOW the toolbar (bar is z-index 9, top ~52px) so the play button,
-   voice picker and notes button are never covered */
-#notes { position:fixed; right:0; top:52px; bottom:0; width:300px; background:#fff;
-         border-left:1px solid #ddd; padding:14px 14px 40px; overflow:auto;
-         display:none; font:14px/1.5 -apple-system,sans-serif; z-index:8;
-         box-shadow:-4px 0 12px rgba(0,0,0,.06); }
-#notes.open { display:block; }
-/* and the text moves over instead of hiding underneath */
-body.notes-open #text { margin-right:336px; }   /* 300 panel + border + shadow + air */
-@media (max-width:820px) { body.notes-open #text { margin-right:0; } }
-#notes h4 { margin:0 0 10px; font-size:15px; padding-right:26px; }
-#noteclose { position:absolute; right:10px; top:10px; border:none; background:none;
-             font-size:20px; cursor:pointer; opacity:.5; line-height:1; }
-#noteclose:hover { opacity:1; }
-#notes .note { border-bottom:1px solid #eee; padding:8px 24px 8px 0; position:relative; }
-#notes .note b { cursor:pointer; }
-#notes .del { position:absolute; right:0; top:8px; border:none; background:none;
-              font-size:17px; color:#b03030; cursor:pointer; opacity:.45; line-height:1; }
-#notes .del:hover { opacity:1; }
-#clearmarks { margin-top:10px; font:12px -apple-system,sans-serif; padding:5px 10px;
-              border:1px solid #ddd; border-radius:8px; background:#fff; cursor:pointer;
-              color:#b03030; }
-#focusbtn.on { background:var(--accent); color:#fff; border-color:var(--accent); }
-::selection { background:#cfe8ff; }
-#notes .note b { display:block; color:#555; font-weight:600; }
-#notes .tags { margin:6px 0 4px; display:flex; gap:4px; flex-wrap:wrap; }
-#notes .tags button { border:1px solid #ccc; background:#fff; border-radius:12px;
-                      font-size:11px; padding:3px 8px; cursor:pointer; }
-#notes .tags button.on { background:var(--accent); color:#fff; border-color:var(--accent); }
-#notes .filter { margin-bottom:10px; font-size:12px; color:#666; }
-#notes .filter select { font-size:12px; padding:3px; }
-#text .marked.tag-question { background:#ffe0e6; box-shadow:0 1px 0 #e06f8b; }
-#text .marked.tag-definition { background:#e2e0ff; box-shadow:0 1px 0 #7b76d6; }
-#text .marked.tag-important { background:#ffeab0; box-shadow:0 1px 0 #d9a520; }
-#text .marked.tag-todo { background:#d8f0d8; box-shadow:0 1px 0 #5aa75a; }
-#notes textarea { width:100%; height:54px; font:13px -apple-system,sans-serif;
-                  border:1px solid #ccc; border-radius:6px; padding:6px; }
+         background:var(--nudge-bg); color:var(--nudge-ink); padding:10px 16px; border-radius:20px;
+         font:14px -apple-system,sans-serif; box-shadow:0 4px 16px rgba(0,0,0,.25); }
+
+/* karaoke */
+.speaking { background:var(--speak); color:var(--on-speak); border-radius:3px; }
 body.skim .speaking { opacity:1 !important; }
 
-/* COMFORT: the dyslexia-informed default. Big type, generous leading, short
-   lines, extra inter-word air. Hard words get letter-spacing + weight. */
-body.comfort #text { max-width:34rem; font:22px/1.9 "Atkinson Hyperlegible",Verdana,sans-serif;
-                     word-spacing:.16em; }
-body.comfort p { margin:0 0 1.4em; }
+/* highlights -- scoped under #text so they win the cascade (see git history:
+   a bare .marked lost to .codeword / .b / .h3 and punched holes in every band) */
+#text .marked { background:var(--hl); box-shadow:0 1px 0 var(--hl-edge); border-radius:2px; }
+#text .marked.hasnote { background:var(--hl-note); box-shadow:0 1px 0 var(--hl-note-edge); }
+#text .marked.tag-question { background:var(--hl-question); box-shadow:0 1px 0 var(--hl-question-edge); }
+#text .marked.tag-definition { background:var(--hl-definition); box-shadow:0 1px 0 var(--hl-definition-edge); }
+#text .marked.tag-important { background:var(--hl-important); box-shadow:0 1px 0 var(--hl-important-edge); }
+#text .marked.tag-todo { background:var(--hl-todo); box-shadow:0 1px 0 var(--hl-todo-edge); }
+#text .marked.speaking { background:var(--speak); color:var(--on-speak); box-shadow:0 1px 0 var(--hl-important-edge); }
+
+/* ---- side panels (notes, text settings) ---- */
+#notes, #textpanel { position:fixed; right:0; top:52px; bottom:0; width:300px; background:var(--surface);
+         color:var(--ink); border-left:1px solid var(--line); padding:14px 14px 40px; overflow:auto;
+         display:none; font:14px/1.5 -apple-system,sans-serif; z-index:8; box-shadow:var(--shadow); }
+#notes.open, #textpanel.open { display:block; }
+body.notes-open #text, body.text-open #text { margin-right:336px; }
+@media (max-width:820px) { body.notes-open #text, body.text-open #text { margin-right:0; } }
+#notes h4, #textpanel h4 { margin:0 0 10px; font-size:15px; padding-right:26px; }
+#noteclose, #textclose { position:absolute; right:10px; top:10px; border:none; background:none;
+             font-size:20px; cursor:pointer; opacity:.5; line-height:1; color:inherit; }
+#noteclose:hover, #textclose:hover { opacity:1; }
+#notes .note { border-bottom:1px solid var(--line); padding:8px 24px 8px 0; position:relative; }
+#notes .note b { display:block; color:var(--ink-muted); font-weight:600; cursor:pointer; }
+#notes .del { position:absolute; right:0; top:8px; border:none; background:none;
+              font-size:17px; color:var(--danger); cursor:pointer; opacity:.55; line-height:1; }
+#notes .del:hover { opacity:1; }
+#clearmarks { margin-top:10px; font:12px -apple-system,sans-serif; padding:5px 10px;
+              border:1px solid var(--line-strong); border-radius:8px; background:var(--surface);
+              cursor:pointer; color:var(--danger); }
+#notes .tags { margin:6px 0 4px; display:flex; gap:4px; flex-wrap:wrap; }
+#notes .tags button { border:1px solid var(--line-strong); background:var(--surface); color:var(--ink);
+                      border-radius:12px; font-size:11px; padding:3px 8px; cursor:pointer; }
+#notes .tags button.on { background:var(--accent); color:var(--on-accent); border-color:var(--accent); }
+#notes .filter { margin-bottom:10px; font-size:12px; color:var(--ink-muted); }
+#notes .filter select, #notes textarea {
+     font:13px -apple-system,sans-serif; border:1px solid var(--line-strong); border-radius:6px;
+     background:var(--surface); color:var(--ink); }
+#notes .filter select { font-size:12px; padding:3px; }
+#notes textarea { width:100%; height:54px; padding:6px; }
+
+/* text settings panel */
+#textpanel label { display:block; margin:12px 0 4px; color:var(--ink-muted); font-size:12.5px; }
+#textpanel label b { color:var(--ink); float:right; font-weight:500; }
+#textpanel input[type=range] { width:100%; accent-color:var(--accent); }
+#textpanel .row { display:flex; gap:6px; margin-top:14px; }
+#textpanel .row button { flex:1; font:12.5px -apple-system,sans-serif; padding:7px 8px;
+     border:1px solid var(--line-strong); border-radius:8px; background:var(--surface);
+     color:var(--ink); cursor:pointer; }
+#textpanel .row button:hover { background:var(--sunken); }
+#textpanel .meta { margin-top:14px; font-size:12px; color:var(--ink-muted); line-height:1.45; }
+
+/* ===== MODE TREATMENTS (typography itself lives in the custom properties) ===== */
 body.comfort .h2 { letter-spacing:.045em; font-weight:600; }
-body.comfort .h3 { letter-spacing:.09em; font-weight:700; background:#efe8f7; border-radius:3px; }
-body.comfort .b { background:#fff3cd; padding:0 2px; border-radius:3px; }
-
-/* FOCUS: the deep-reading block. Uniform, calm, minimal signalling -- dense on
-   purpose. Difficulty marks are switched OFF here; only the author's own
-   emphasis survives, so nothing competes with the argument. */
-body.focus #text { max-width:44rem; font:19px/1.65 Georgia,serif; }
-body.focus p { margin:0 0 1.1em; }
-body.focus .h2, body.focus .h3 { letter-spacing:normal; font-weight:inherit;
-                                 background:none; }
-
-/* SKIM: the page's SKELETON. Topic sentence of each paragraph stays full
-   strength, the rest recedes; headings and the author's own bold stay loud.
-   (This used to bold the first two words of every paragraph, which cut
-   sentences mid-phrase and read as random highlighting.) */
-body.skim #text { max-width:38rem; font:19px/1.75 -apple-system,sans-serif; }
-body.skim p { margin:0 0 1.3em; }
-body.skim #text p span[data-w] { opacity:.4; }
-body.skim #text p span.lead { opacity:1; font-weight:500; }     /* topic sentence */
-body.skim #text p span.b { opacity:1; }                          /* author's own bold */
-body.skim #text h2 span, body.skim #text h3 span { opacity:1; }
-body.skim #text pre.code span { opacity:.75; }
-/* A highlight is never "background": skim's dimming must not eat it. Both
-   branches needed -- prose words live in <p>, code lines in <pre class=code>. */
-body.skim #text p span[data-w].marked,
-body.skim #text pre.code span[data-w].marked { opacity:1; }
-/* Karaoke has to stay visible on a word she has highlighted (it was already
-   losing to .marked on source order before today). */
-#text .marked.speaking { background:#ffe9a8; box-shadow:0 1px 0 #e0b93a; }
-
-/* the document's OWN emphasis, in every mode */
-.b { font-weight:700; }
-.i { font-style:italic; }
-.codeword { font-family:"SF Mono",Menlo,monospace; font-size:.92em; background:#f2efe9;
-            padding:0 3px; border-radius:3px; letter-spacing:normal !important; }
-#text h2 { font-size:1.35em; margin:1.6em 0 .5em; line-height:1.3; }
-#text h3 { font-size:1.12em; margin:1.3em 0 .4em; line-height:1.35; }
-#text h2 span[data-w], #text h3 span[data-w] { letter-spacing:normal; }
+body.comfort .h3 { letter-spacing:.09em; font-weight:700; background:var(--accent-soft); border-radius:3px; }
+body.comfort .b { background:var(--emph); padding:0 2px; border-radius:3px; }
+body.focus .h2, body.focus .h3 { letter-spacing:normal; font-weight:inherit; background:none; }
+body.skim #text p span[data-w] { color:var(--ink-dim); }
+body.skim #text p span.lead { color:var(--ink); font-weight:500; }
+body.skim #text p span.b { color:var(--ink); }
+body.skim #text h2 span, body.skim #text h3 span { color:var(--ink); }
+body.skim #text pre.code span { opacity:.85; }
+body.skim #text p span[data-w].marked, body.skim #text pre.code span[data-w].marked { color:var(--ink); }
 """
 
 JS = """
@@ -520,11 +631,85 @@ function publishPrefs(){
     profile: window.__profile,
     autofocus_off: pref("autofocus_off", 0) ? 1 : 0,
     hint_seen: pref("hint_seen", 0) ? 1 : 0,
+    theme: window.__theme || "auto",
+    typo: TYPO,
   });
+}
+// Any change that reflows the page bumps this. The recorder polls it and
+// re-measures where every word is -- a word map made for one layout is fiction
+// for another, which corrupted gaze data silently before this existed.
+window.__layout = 0;
+function bumpLayout(){ window.__layout = (window.__layout | 0) + 1; }
+
+// ---- theme: system preference by default, one button to override ----
+function applyTheme(t){
+  const r = document.documentElement;
+  if (t === "light" || t === "dark") r.dataset.theme = t; else delete r.dataset.theme;
+  window.__theme = t;
+  const b = document.getElementById("theme");
+  if (b) b.innerHTML = t === "dark" ? "&#9790;" : t === "light" ? "&#9728;" : "&#9681;";
+}
+function setTheme(t){ localStorage.setItem("theme", t); applyTheme(t); publishPrefs(); }
+applyTheme(pref("theme", "auto"));
+
+// ---- typography: the reader's own numbers, per mode ----
+const TYPO_KEYS = {size:["--size","px"], lead:["--lead",""], measure:["--measure","ch"],
+                   wsp:["--wsp","em"], lsp:["--lsp","em"]};
+let TYPO = (() => { try { return JSON.parse(localStorage.getItem("typo") || "null")
+                              || (PREFS && PREFS.typo) || {}; } catch(e){ return {}; } })();
+function applyTypo(){
+  const mine = TYPO[window.__profile] || {};
+  for (const k of Object.keys(TYPO_KEYS)){
+    const [prop, unit] = TYPO_KEYS[k];
+    if (mine[k] !== undefined && mine[k] !== null) document.body.style.setProperty(prop, mine[k] + unit);
+    else document.body.style.removeProperty(prop);
+  }
+  syncTypoPanel();
+}
+function currentTypo(){
+  const cs = getComputedStyle(document.body);
+  const num = v => parseFloat(v) || 0;
+  return {size: num(cs.getPropertyValue("--size")) || 19,
+          lead: num(cs.getPropertyValue("--lead")) || 1.65,
+          measure: num(cs.getPropertyValue("--measure")) || 66,
+          wsp: (cs.getPropertyValue("--wsp").trim() === "normal") ? 0 : num(cs.getPropertyValue("--wsp")),
+          lsp: num(cs.getPropertyValue("--lsp"))};
+}
+function syncTypoPanel(){
+  const t = currentTypo();
+  for (const k of Object.keys(TYPO_KEYS)){
+    const s = document.getElementById("s-" + k), v = document.getElementById("v-" + k);
+    if (!s) continue;
+    s.value = t[k];
+    v.textContent = k === "size" ? t.size + "px" : k === "measure" ? t.measure + " characters"
+                  : k === "lead" ? (+t.lead).toFixed(2) + "\u00d7" : (+t[k]).toFixed(2) + "em";
+  }
+}
+function setTypo(k, val){
+  TYPO[window.__profile] = TYPO[window.__profile] || {};
+  TYPO[window.__profile][k] = +val;
+  localStorage.setItem("typo", JSON.stringify(TYPO));
+  applyTypo(); publishPrefs(); bumpLayout();
+}
+function resetTypo(){
+  delete TYPO[window.__profile];
+  localStorage.setItem("typo", JSON.stringify(TYPO));
+  applyTypo(); publishPrefs(); bumpLayout();
+  nudge("Back to the standard " + window.__profile + " layout");
+}
+function showText(open){
+  const panel = document.getElementById("textpanel");
+  const want = (open === undefined) ? !panel.classList.contains("open") : open;
+  if (want) showNotes(false);
+  panel.classList.toggle("open", want);
+  document.body.classList.toggle("text-open", want);
+  if (want) syncTypoPanel();
+  bumpLayout();
 }
 window.__profile = pref("profile", DEFAULT_PROFILE);
 function setProfile(p){
   window.__profile = p; localStorage.setItem("profile", p); publishPrefs();
+  applyTypo(); bumpLayout();
   document.body.className = p;
   for (const b of document.querySelectorAll("#bar button[data-p]"))
     b.classList.toggle("on", b.dataset.p === p);
@@ -556,6 +741,20 @@ document.addEventListener("DOMContentLoaded", () => {
     setTimeout(() => startFrom(0), 400);
   }
   document.getElementById("focusbtn").onclick = () => toggleFocus();
+  document.getElementById("textbtn").onclick = () => showText();
+  document.getElementById("textclose").onclick = () => showText(false);
+  document.getElementById("typo-reset").onclick = resetTypo;
+  for (const k of Object.keys(TYPO_KEYS)){
+    const sl = document.getElementById("s-" + k);
+    if (sl) sl.oninput = () => setTypo(k, sl.value);
+  }
+  document.getElementById("theme").onclick = () => {
+    const cur = window.__theme || "auto";
+    setTheme(cur === "auto" ? "dark" : cur === "dark" ? "light" : "auto");
+    nudge("Theme: " + (window.__theme === "auto" ? "follows your system" : window.__theme));
+  };
+  applyTheme(window.__theme || "auto");
+  applyTypo();
   document.getElementById("marks").onclick = () => showNotes();
   document.getElementById("noteclose").onclick = () => showNotes(false);
   document.getElementById("clearmarks").onclick = () => {
@@ -878,8 +1077,11 @@ function currentWord(){
 function showNotes(open){
   const panel = document.getElementById("notes");
   const want = (open === undefined) ? !panel.classList.contains("open") : open;
+  if (want){ const tp = document.getElementById("textpanel");
+             if (tp){ tp.classList.remove("open"); document.body.classList.remove("text-open"); } }
   panel.classList.toggle("open", want);
   document.body.classList.toggle("notes-open", want);
+  bumpLayout();
 }
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA"){
@@ -891,6 +1093,13 @@ document.addEventListener("keydown", (e) => {
     if (id !== undefined) nudge("Sentence highlighted — press N to write a note");
   }
   if (e.key === "n" || e.key === "N") showNotes();
+  if (e.key === "t" || e.key === "T") showText();
+  if ("1234".includes(e.key) && e.key !== "" && lastMark !== null && marks[lastMark]){
+    const t = TAGS[+e.key - 1];
+    marks[lastMark].tag = (marks[lastMark].tag === t) ? null : t;
+    paintMark(lastMark); saveMarks();
+    nudge(marks[lastMark].tag ? "Tagged: " + t : "Tag removed");
+  }
   if (e.key === "u" || e.key === "U"){
     if (lastMark !== null && marks[lastMark]){ removeMark(lastMark); lastMark = null;
       nudge("Highlight removed"); }
@@ -898,7 +1107,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "f" || e.key === "F") toggleFocus();
   if (e.key === "Escape"){
     if (document.body.classList.contains("focusing")) toggleFocus(false);
-    else showNotes(false);
+    else { showNotes(false); showText(false); }
   }
 });
 
@@ -1227,32 +1436,36 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
         nav = (f"<a id='next' href='{html.escape(next_href)}'>Next chapter &rarr;"
                f"<small>{label}</small></a>")
     with open(out, "w", encoding="utf-8") as fh:
-        fh.write("<!doctype html><html><head><meta charset='utf-8'>"
+        theme = (prefs or {}).get("theme") if isinstance(prefs, dict) else None
+        root_attr = f" data-theme='{theme}'" if theme in ("light", "dark") else ""
+        fh.write(f"<!doctype html><html{root_attr}><head><meta charset='utf-8'>"
                  f"<title>{html.escape(os.path.basename(text_path))}</title>"
                  f"<style>{CSS}</style><script>const DEFAULT_WPM={int(wpm)};"
                  f"const DEFAULT_PROFILE={profile!r};"
                  f"const PREFS={json.dumps(prefs or {})};{JS}</script></head>"
                  f"<body class='{profile}'>"
                  "<div id='bar'><span id='brand'>&#128065; Adaptive Reading</span>"
-                 "<b style='font:14px -apple-system'>mode:</b>"
-                 "<button data-p='comfort'>Comfort</button>"
+                 "<div id='modes'><button data-p='comfort'>Comfort</button>"
                  "<button data-p='focus'>Focus</button>"
-                 "<button data-p='skim'>Skim</button>"
-                 "<div id='rbar'><button id='slower'>&minus;</button>"
-                 "<span id='wpm'></span><button id='faster'>+</button>"
-                 "<a id='profile' href='../progress.html' title='your reading profile'>"
-                 "&#128100; my reading</a>"
+                 "<button data-p='skim'>Skim</button></div>"
+                 "<div id='rbar'>"
+                 "<div id='pace'><button id='slower' title='slower'>&minus;</button>"
+                 "<span id='wpm'></span><button id='faster' title='faster'>+</button></div>"
+                 "<button id='play'>&#9654; read along</button>"
                  "<button id='focusbtn' title='dim everything except the passage "
                  "you are reading (F)'>focus</button>"
                  "<button id='marks' title='highlights and notes (N)'>&#9998; notes</button>"
-                 "<select id='voice' title='voice'></select>"
-                 "<button id='vtest' title='hear this voice'>&#9835;</button>"
-                 "<button id='play'>&#9654; read along</button></div></div>"
+                 "<button id='textbtn' title='text size, spacing, voice (T)'>Aa</button>"
+                 "<button id='theme' title='light / dark'>&#9681;</button>"
+                 "<a id='profile' href='../progress.html' title='your reading profile'>"
+                 "&#128100; my reading</a>"
+                 "</div></div>"
                  f"<div id='pstate'>{_state_line(model)}</div>"
                  "<div id='hint'><span>This page adapts to you: "
                  "<b>select any sentence</b> to highlight and note it "
                  "(or <b>M</b> for the sentence you are on) &middot; <b>N</b> opens your "
-                 "notes &middot; <b>F</b> or <b>Esc</b> toggles focus &middot; "
+                 "notes &middot; <b>T</b> adjusts text size and spacing &middot; "
+                 "<b>F</b> or <b>Esc</b> toggles focus &middot; "
                  "<span class='h3'>marked words</span> are ones readers usually find "
                  "hard &middot; pick a mode above &middot; &#9654; reads along at your "
                  "own measured pace.</span><button id='hintx' title='got it'>&#10005;"
@@ -1269,5 +1482,23 @@ def build_page(text_path, out_dir, wpm=135, model=None, profile="comfort",
                  "<p style='color:#888;font-size:12px'>Drag across text to highlight "
                  "&middot; M takes the sentence you are on &middot; U undoes the last one "
                  "&middot; N or Esc closes this panel</p>"
-                 "<button id='clearmarks'>clear all highlights</button></div></body></html>")
+                 "<button id='clearmarks'>clear all highlights</button></div>"
+                 "<div id='textpanel'><button id='textclose' title='close'>&times;</button>"
+                 "<h4>Text &amp; voice</h4>"
+                 "<label>Size <b id='v-size'></b></label>"
+                 "<input type='range' id='s-size' min='16' max='30' step='1'>"
+                 "<label>Line spacing <b id='v-lead'></b></label>"
+                 "<input type='range' id='s-lead' min='1.3' max='2.3' step='0.05'>"
+                 "<label>Line length <b id='v-measure'></b></label>"
+                 "<input type='range' id='s-measure' min='35' max='95' step='1'>"
+                 "<label>Word spacing <b id='v-wsp'></b></label>"
+                 "<input type='range' id='s-wsp' min='0' max='0.4' step='0.02'>"
+                 "<label>Letter spacing <b id='v-lsp'></b></label>"
+                 "<input type='range' id='s-lsp' min='0' max='0.12' step='0.01'>"
+                 "<div class='row'><button id='typo-reset'>reset this mode</button></div>"
+                 "<label>Voice</label><select id='voice' title='voice'></select> "
+                 "<button id='vtest' class='ctl' title='hear this voice'>&#9835; test</button>"
+                 "<p class='meta'>These settings are yours: they are saved per reading mode, "
+                 "restored next time, and every change is recorded so your profile can show "
+                 "what you actually keep.</p></div></body></html>")
     return out

@@ -308,6 +308,12 @@ def auto_camera(face_mesh, preferred_name=None, max_probe=6):
             cap.release()
     if opened:
         i, cap = opened
+        if phoneish(i):
+            # nobody in frame anywhere and the only working camera is a phone:
+            # do not quietly adopt it -- that is how the iPhone became the saved
+            # camera. Hand back to the picker instead.
+            cap.release()
+            return None
         print(f"camera: index {i} (no face detected yet -- press C in the preview "
               f"to try another)")
         auto_camera.chosen = i
@@ -927,16 +933,37 @@ def pick_text():
 
 # ------------------------------------------------------------------- browser
 def open_text(url):
-    """Selenium + word map, same approach as your original."""
+    """Open the page in Chrome and map its words.
+
+    Selenium's own driver manager resolves chromedriver from a local cache, so
+    there is no network round-trip on every launch (webdriver_manager cost
+    ~1.3 s per start and failed offline). And instead of a fixed 3 s sleep we
+    wait until the page is actually ready -- usually well under a second."""
     from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
-    from webdriver_manager.chrome import ChromeDriverManager
 
     options = webdriver.ChromeOptions()
     options.add_argument("--start-maximized")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    try:
+        driver = webdriver.Chrome(options=options)
+    except Exception:
+        from selenium.webdriver.chrome.service import Service
+        from webdriver_manager.chrome import ChromeDriverManager
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     driver.get(url)
-    time.sleep(3)
+    is_ours = ".adaptive.html" in url
+    deadline = time.monotonic() + (8 if is_ours else 3)
+    while time.monotonic() < deadline:
+        try:
+            ready = driver.execute_script(
+                "return document.readyState === 'complete' && "
+                "(arguments[0] ? !!document.querySelector('span[data-w]') : true);", is_ours)
+        except Exception:
+            ready = False
+        if ready:
+            break
+        time.sleep(0.05)
+    if not is_ours:
+        time.sleep(1.0)                      # third-party pages: let scripts paint
     word_map = read_word_map(driver)
     rect = driver.get_window_rect()
     header = rect["height"] - driver.execute_script("return window.innerHeight;")
@@ -1047,7 +1074,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v23: just-read mode (no camera); double-click launcher"
+RECORDER_VERSION = "v24: dark mode, text controls, words re-mapped on every reflow"
 
 
 def main():
@@ -1109,7 +1136,8 @@ def main():
                 db.set_setting(conn, "camera_name", names[pick_camera.chosen])
 
         calib_note = None
-        prev = db.last_calibration(conn, uid, cfg["device"]) if cfg["reuse"] else None
+        prev = (db.last_calibration(conn, uid, cfg["device"], screen_w=screen_w, screen_h=screen_h)
+            if cfg["reuse"] else None)
         if prev:
             # returning reader on a known screen: skip the dots. The trade is drift
             # (today's seating differs from that day's), so the reuse is on record.
@@ -1192,6 +1220,7 @@ def main():
     marks_state = None             # marked passages + notes, mirrored to the db
     recall_state = None            # section summaries typed from memory
     prefs_state = None             # voice / speed / mode, saved as she changes them
+    layout_seen = 0                # page reflow counter: a change means re-map the words
     page_href = browser.current_url  # watched so a chapter change remaps the words
     from collections import deque
     # (t_ms, hit) pairs evicted BY TIME, not by count. Counting frames made the
@@ -1212,15 +1241,15 @@ def main():
         and act on it. Runs every 5th frame with a camera, every tick without one."""
         nonlocal prefs_state, recall_state, page_href, word_offset, word_map, word_index
         nonlocal scroll_y, profile, tts_state, attention, att_cand, att_cand_since
-        nonlocal last_flip, marks_state
+        nonlocal last_flip, marks_state, layout_seen
         try:
             (sy, prof, tts, marks, href, recall,
-             prefs_json) = browser.execute_script(
+             prefs_json, layout_n) = browser.execute_script(
                 "return [(window.__mlScrollTop ? window.__mlScrollTop()"
                 " : window.scrollY), window.__profile || null,"
                 " window.__tts || null, window.__marks || null,"
                 " location.href, window.__recall || null,"
-                " window.__prefs || null];")
+                " window.__prefs || null, window.__layout || 0];")
             if prefs_json and prefs_json != prefs_state:
                 prefs_state = prefs_json
                 try:
@@ -1233,10 +1262,20 @@ def main():
                     db.add_check(conn, sid, "recall",
                                  f"section {item.get('at')} summary",
                                  item.get("text"))
+            if layout_n != layout_seen and href == page_href:
+                # mode switch, panel opened, text resized: the page reflowed and
+                # every word moved. Re-measure now, or every gaze from here on
+                # lands on the wrong word.
+                layout_seen = layout_n
+                word_map = read_word_map(browser)
+                word_index = WordIndex(word_map)
+                db.save_words(conn, sid, word_map, offset=word_offset)
+                db.add_event(conn, sid, t_ms, "layout", str(layout_n))
             if href != page_href:
                 # reader moved to the next chapter: the old word
                 # map describes a page that is no longer on screen.
                 page_href = href
+                layout_seen = 0
                 new_map = read_word_map(browser)   # re-installs the scroller
                 word_offset += len(word_map)
                 word_map = new_map
