@@ -81,7 +81,7 @@ def setup_form(conn, uid):
     device, glasses, feeling, source(kind, value), reuse_calibration."""
     from tkinter import ttk, filedialog
     known = db.known_devices(conn, uid)
-    root = tk.Tk(); root.title("Session setup"); root.geometry("440x680")
+    root = tk.Tk(); root.title("Session setup"); root.geometry("460x720")
     root.resizable(True, True)
     pad = {"padx": 14, "pady": 5, "anchor": "w"}
 
@@ -90,6 +90,7 @@ def setup_form(conn, uid):
     def start():
         cam = camera.get().strip()
         out.update(camera=(None if cam.startswith("(") else cam),
+                   no_camera=bool(nocam.get()),
                    chapters=int(chapters.get() or 3),
                    device=(device.get() or "unnamed").strip(),
                    glasses=int(glasses.get()),
@@ -134,6 +135,9 @@ def setup_form(conn, uid):
     reuse = tk.BooleanVar(value=True)
     tk.Checkbutton(root, text="reuse last good calibration for this device",
                    variable=reuse).pack(**pad)
+    nocam = tk.BooleanVar(value=bool(int(db.get_setting(conn, "last_no_camera", "0") or 0)))
+    tk.Checkbutton(root, text="just read  (no camera, no calibration -- page, voice and notes only)",
+                   variable=nocam).pack(**pad)
 
     tk.Label(root, text="Chapters to prepare ahead:").pack(**pad)
     chapters = ttk.Combobox(root, values=["1", "3", "5", "10"], width=6)
@@ -1043,7 +1047,7 @@ class WordIndex:
 
 
 # ---------------------------------------------------------------------- main
-RECORDER_VERSION = "v22: figures included; highlights only on a real drag"
+RECORDER_VERSION = "v23: just-read mode (no camera); double-click launcher"
 
 
 def main():
@@ -1058,69 +1062,75 @@ def main():
     cfg = setup_form(conn, uid)
     if not cfg:
         print("setup cancelled"); return
+    db.set_setting(conn, "last_no_camera", int(cfg.get("no_camera", False)))
 
-    face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
-    cap = auto_camera(face_mesh,
-                      preferred_name=cfg.get("camera") or db.get_setting(conn, "camera_name"))
-    if cap is None:
-        print("no camera found -- check System Settings > Privacy & Security > Camera")
-        return
-    pick_camera.chosen = getattr(auto_camera, "chosen", 0)
-
-    # Can the tracker see your pupils -- and is this even the right camera?
-    # C cycles to the next one, so a wrong camera is never a dead end.
-    names = [n for n, _ in camera_inventory()]
-    while True:
-        verdict = tracking_preview(cap, face_mesh)
-        if verdict is True:
-            break
-        cap.release()
-        if verdict is False:
-            print("aborted at tracking check"); return
-        start = (pick_camera.chosen or 0) + 1        # "switch": try the next one
-        cap = None
-        for step in range(max(len(names), 5)):
-            idx = (start + step) % max(len(names), 5)
-            cap = open_camera(idx)
-            if cap is not None:
-                pick_camera.chosen = idx
-                pick_camera.explicit = True
-                print(f"camera: {names[idx] if idx < len(names) else 'index ' + str(idx)}")
-                break
-        if cap is None:
-            print("no other camera responded"); return
-
-    # Save the choice the reader CONFIRMED by pressing SPACE on a good preview,
-    # together with the camera line-up it belongs to.
-    if pick_camera.chosen is not None:
-        db.set_setting(conn, "camera_index", pick_camera.chosen)
-        db.set_setting(conn, "camera_fingerprint", camera_fingerprint())
-        if pick_camera.chosen < len(names):
-            db.set_setting(conn, "camera_name", names[pick_camera.chosen])
-
-    calib_note = None
-    prev = db.last_calibration(conn, uid, cfg["device"]) if cfg["reuse"] else None
-    if prev:
-        # returning reader on a known screen: skip the dots. The trade is drift
-        # (today's seating differs from that day's), so the reuse is on record.
-        mapping, err = json.loads(prev[1]), prev[2]
-        calib_note = f"calibration reused from session {prev[0]} ({prev[3][:10]})"
-        print(f"reusing calibration from session {prev[0]}: {err:.0f} px on {cfg['device']}")
+    if cfg.get("no_camera"):
+        cap = face_mesh = mapping = err = None
+        calib_note = "reading-only session (no eye tracking)"
+        print("reading-only: no camera, no calibration")
     else:
+        face_mesh = mp.solutions.face_mesh.FaceMesh(refine_landmarks=True)
+        cap = auto_camera(face_mesh,
+                          preferred_name=cfg.get("camera") or db.get_setting(conn, "camera_name"))
+        if cap is None:
+            print("no camera found -- check System Settings > Privacy & Security > Camera")
+            return
+        pick_camera.chosen = getattr(auto_camera, "chosen", 0)
+
+        # Can the tracker see your pupils -- and is this even the right camera?
+        # C cycles to the next one, so a wrong camera is never a dead end.
+        names = [n for n, _ in camera_inventory()]
         while True:
-            print("calibrating...")
-            mapping, err = run_calibration(cap, face_mesh, screen_w, screen_h)
-            if mapping is None:
-                print("calibration aborted"); cap.release(); return
-            verdict = ("word-level ok" if err < 40 else
-                       "line-level only" if err < 120 else "poor")
-            print(f"calibration error: {err:.0f} px ({verdict})")
-            if err < 120:
+            verdict = tracking_preview(cap, face_mesh)
+            if verdict is True:
                 break
-            again = ask("Calibration", f"Error {err:.0f} px is poor. Type r to redo "
-                        "(fix lighting/seating first), anything else to continue anyway:")
-            if (again or "").strip().lower() != "r":
-                break
+            cap.release()
+            if verdict is False:
+                print("aborted at tracking check"); return
+            start = (pick_camera.chosen or 0) + 1        # "switch": try the next one
+            cap = None
+            for step in range(max(len(names), 5)):
+                idx = (start + step) % max(len(names), 5)
+                cap = open_camera(idx)
+                if cap is not None:
+                    pick_camera.chosen = idx
+                    pick_camera.explicit = True
+                    print(f"camera: {names[idx] if idx < len(names) else 'index ' + str(idx)}")
+                    break
+            if cap is None:
+                print("no other camera responded"); return
+
+        # Save the choice the reader CONFIRMED by pressing SPACE on a good preview,
+        # together with the camera line-up it belongs to.
+        if pick_camera.chosen is not None:
+            db.set_setting(conn, "camera_index", pick_camera.chosen)
+            db.set_setting(conn, "camera_fingerprint", camera_fingerprint())
+            if pick_camera.chosen < len(names):
+                db.set_setting(conn, "camera_name", names[pick_camera.chosen])
+
+        calib_note = None
+        prev = db.last_calibration(conn, uid, cfg["device"]) if cfg["reuse"] else None
+        if prev:
+            # returning reader on a known screen: skip the dots. The trade is drift
+            # (today's seating differs from that day's), so the reuse is on record.
+            mapping, err = json.loads(prev[1]), prev[2]
+            calib_note = f"calibration reused from session {prev[0]} ({prev[3][:10]})"
+            print(f"reusing calibration from session {prev[0]}: {err:.0f} px on {cfg['device']}")
+        else:
+            while True:
+                print("calibrating...")
+                mapping, err = run_calibration(cap, face_mesh, screen_w, screen_h)
+                if mapping is None:
+                    print("calibration aborted"); cap.release(); return
+                verdict = ("word-level ok" if err < 40 else
+                           "line-level only" if err < 120 else "poor")
+                print(f"calibration error: {err:.0f} px ({verdict})")
+                if err < 120:
+                    break
+                again = ask("Calibration", f"Error {err:.0f} px is poor. Type r to redo "
+                            "(fix lighting/seating first), anything else to continue anyway:")
+                if (again or "").strip().lower() != "r":
+                    break
 
     pick_text.wpm = measured_wpm(conn, uid)
     from recorder import personalize
@@ -1152,7 +1162,8 @@ def main():
     if calib_note:
         conn.execute("UPDATE sessions SET notes = ? WHERE session_id = ?",
                      (calib_note, sid)); conn.commit()
-    db.save_calibration(conn, sid, mapping, err)
+    if mapping is not None:
+        db.save_calibration(conn, sid, mapping, err)
     conn.execute("UPDATE sessions SET scroll_source = ? WHERE session_id = ?",
                  (str(install_scroller(browser))[:60], sid)); conn.commit()
     db.save_words(conn, sid, word_map)
@@ -1196,9 +1207,119 @@ def main():
     away_since = None                # face gone: reader is doing something else
     away_state = False
     word_offset = 0                  # keeps word_index unique across chapters
-    print("recording -- press q in the camera window to stop")
+    def poll_page(t_ms):
+        """Read what the page is doing (scroll, mode, voice, marks, prefs, chapter)
+        and act on it. Runs every 5th frame with a camera, every tick without one."""
+        nonlocal prefs_state, recall_state, page_href, word_offset, word_map, word_index
+        nonlocal scroll_y, profile, tts_state, attention, att_cand, att_cand_since
+        nonlocal last_flip, marks_state
+        try:
+            (sy, prof, tts, marks, href, recall,
+             prefs_json) = browser.execute_script(
+                "return [(window.__mlScrollTop ? window.__mlScrollTop()"
+                " : window.scrollY), window.__profile || null,"
+                " window.__tts || null, window.__marks || null,"
+                " location.href, window.__recall || null,"
+                " window.__prefs || null];")
+            if prefs_json and prefs_json != prefs_state:
+                prefs_state = prefs_json
+                try:
+                    db.save_prefs(conn, uid, json.loads(prefs_json))
+                except Exception:
+                    pass
+            if recall != recall_state:
+                recall_state = recall
+                for item in json.loads(recall or "[]"):
+                    db.add_check(conn, sid, "recall",
+                                 f"section {item.get('at')} summary",
+                                 item.get("text"))
+            if href != page_href:
+                # reader moved to the next chapter: the old word
+                # map describes a page that is no longer on screen.
+                page_href = href
+                new_map = read_word_map(browser)   # re-installs the scroller
+                word_offset += len(word_map)
+                word_map = new_map
+                word_index = WordIndex(word_map)
+                db.save_words(conn, sid, word_map, offset=word_offset)
+                db.add_event(conn, sid, t_ms, "page", href.split("/")[-1])
+                print(f"  -> chapter change: {len(word_map)} words remapped")
+            if sy is not None:          # None while the page is mid-load
+                scroll_y = float(sy)
+            if prof != profile:         # reader switched mode: that's data
+                profile = prof
+                db.add_event(conn, sid, t_ms, "profile", prof)
+            if tts != tts_state:        # read-along toggled / speed changed
+                tts_state = tts
+                db.add_event(conn, sid, t_ms, "tts", tts)
+            # ATTENTION, measured RELATIVE to this reader's own
+            # baseline. An absolute threshold is wrong here: replaying
+            # the recorded sessions, on-text rate is only ~35% even
+            # while reading normally (words are small, webcam gaze is
+            # coarse), so any fixed cutoff flagged 83-100% of every
+            # session as distracted. Comparing the last ~10 s to the
+            # last ~100 s of the SAME session flags 2-15% instead --
+            # drops relative to how this person reads today.
+            span = (on_text[-1][0] - on_text[0][0]) if len(on_text) > 1 else 0
+            base_span = ((on_text_base[-1][0] - on_text_base[0][0])
+                         if len(on_text_base) > 1 else 0)
+            # Only judge attention when the reader is present, the
+            # windows are actually full, they have had a moment to
+            # settle after looking away, and we have not just
+            # changed state. Then require the new reading to PERSIST
+            # for HOLD_MS before acting: a 12 s sustained drop is a
+            # drifting reader, a 3 s one is a glance at the clock.
+            # Tuned by replaying her real sessions: this took the
+            # note-taking session from 51 state changes / 27.6% of the
+            # session dimmed to 9 changes / 13.5%.
+            if (not away_state and span > 8_000 and base_span > 60_000
+                    and len(on_text) >= 60
+                    and t_ms - back_at > SETTLE_MS
+                    and t_ms - last_flip > COOLDOWN_MS):
+                base = sum(h for _, h in on_text_base) / len(on_text_base)
+                cur = sum(h for _, h in on_text) / len(on_text)
+                if base > 0.02:
+                    want = ("low" if cur < 0.55 * base else
+                            "ok" if cur > 0.80 * base else attention)
+                    if want != att_cand:
+                        att_cand, att_cand_since = want, t_ms
+                    elif (want != attention
+                          and t_ms - (att_cand_since or t_ms) > HOLD_MS):
+                        attention = want
+                        last_flip = t_ms
+                        browser.execute_script(
+                            "window.setAttention && window.setAttention(arguments[0]);",
+                            attention)
+                        db.add_event(conn, sid, t_ms, "attention",
+                                     f"{attention} (now {cur:.2f} vs base {base:.2f})")
+            if marks != marks_state:    # reader marked/annotated a passage
+                marks_state = marks
+                db.add_event(conn, sid, t_ms, "mark", marks)
+                try:
+                    db.save_notes(conn, sid, json.loads(marks or "[]"))
+                except Exception:
+                    pass
+        except Exception:
+            pass                        # browser busy/navigating: keep last value
+
+    if cap is None:
+        print("reading -- close the browser window when you are done")
+    else:
+        print("recording -- press q in the camera window to stop")
     try:
         while True:
+            if cap is None:
+                # reading-only: no frames, just keep the page's state flowing to
+                # the database until she closes the browser
+                time.sleep(0.25)
+                t_ms = (time.monotonic() - t0) * 1000
+                n_frames += 1
+                try:
+                    browser.current_url            # raises once the window is closed
+                except Exception:
+                    break
+                poll_page(t_ms)
+                continue
             ok, frame = cap.read()
             if not ok:
                 break
@@ -1223,94 +1344,7 @@ def main():
                 if f["norm_x"] is not None:
                     gaze_x, gaze_y = calibrate.apply(mapping, f["norm_x"], f["norm_y"])[0]
                     if n_frames % 5 == 1:
-                        try:
-                            (sy, prof, tts, marks, href, recall,
-                             prefs_json) = browser.execute_script(
-                                "return [(window.__mlScrollTop ? window.__mlScrollTop()"
-                                " : window.scrollY), window.__profile || null,"
-                                " window.__tts || null, window.__marks || null,"
-                                " location.href, window.__recall || null,"
-                                " window.__prefs || null];")
-                            if prefs_json and prefs_json != prefs_state:
-                                prefs_state = prefs_json
-                                try:
-                                    db.save_prefs(conn, uid, json.loads(prefs_json))
-                                except Exception:
-                                    pass
-                            if recall != recall_state:
-                                recall_state = recall
-                                for item in json.loads(recall or "[]"):
-                                    db.add_check(conn, sid, "recall",
-                                                 f"section {item.get('at')} summary",
-                                                 item.get("text"))
-                            if href != page_href:
-                                # reader moved to the next chapter: the old word
-                                # map describes a page that is no longer on screen.
-                                page_href = href
-                                new_map = read_word_map(browser)   # re-installs the scroller
-                                word_offset += len(word_map)
-                                word_map = new_map
-                                word_index = WordIndex(word_map)
-                                db.save_words(conn, sid, word_map, offset=word_offset)
-                                db.add_event(conn, sid, t_ms, "page", href.split("/")[-1])
-                                print(f"  -> chapter change: {len(word_map)} words remapped")
-                            if sy is not None:          # None while the page is mid-load
-                                scroll_y = float(sy)
-                            if prof != profile:         # reader switched mode: that's data
-                                profile = prof
-                                db.add_event(conn, sid, t_ms, "profile", prof)
-                            if tts != tts_state:        # read-along toggled / speed changed
-                                tts_state = tts
-                                db.add_event(conn, sid, t_ms, "tts", tts)
-                            # ATTENTION, measured RELATIVE to this reader's own
-                            # baseline. An absolute threshold is wrong here: replaying
-                            # the recorded sessions, on-text rate is only ~35% even
-                            # while reading normally (words are small, webcam gaze is
-                            # coarse), so any fixed cutoff flagged 83-100% of every
-                            # session as distracted. Comparing the last ~10 s to the
-                            # last ~100 s of the SAME session flags 2-15% instead --
-                            # drops relative to how this person reads today.
-                            span = (on_text[-1][0] - on_text[0][0]) if len(on_text) > 1 else 0
-                            base_span = ((on_text_base[-1][0] - on_text_base[0][0])
-                                         if len(on_text_base) > 1 else 0)
-                            # Only judge attention when the reader is present, the
-                            # windows are actually full, they have had a moment to
-                            # settle after looking away, and we have not just
-                            # changed state. Then require the new reading to PERSIST
-                            # for HOLD_MS before acting: a 12 s sustained drop is a
-                            # drifting reader, a 3 s one is a glance at the clock.
-                            # Tuned by replaying her real sessions: this took the
-                            # note-taking session from 51 state changes / 27.6% of the
-                            # session dimmed to 9 changes / 13.5%.
-                            if (not away_state and span > 8_000 and base_span > 60_000
-                                    and len(on_text) >= 60
-                                    and t_ms - back_at > SETTLE_MS
-                                    and t_ms - last_flip > COOLDOWN_MS):
-                                base = sum(h for _, h in on_text_base) / len(on_text_base)
-                                cur = sum(h for _, h in on_text) / len(on_text)
-                                if base > 0.02:
-                                    want = ("low" if cur < 0.55 * base else
-                                            "ok" if cur > 0.80 * base else attention)
-                                    if want != att_cand:
-                                        att_cand, att_cand_since = want, t_ms
-                                    elif (want != attention
-                                          and t_ms - (att_cand_since or t_ms) > HOLD_MS):
-                                        attention = want
-                                        last_flip = t_ms
-                                        browser.execute_script(
-                                            "window.setAttention && window.setAttention(arguments[0]);",
-                                            attention)
-                                        db.add_event(conn, sid, t_ms, "attention",
-                                                     f"{attention} (now {cur:.2f} vs base {base:.2f})")
-                            if marks != marks_state:    # reader marked/annotated a passage
-                                marks_state = marks
-                                db.add_event(conn, sid, t_ms, "mark", marks)
-                                try:
-                                    db.save_notes(conn, sid, json.loads(marks or "[]"))
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass                        # browser busy/navigating: keep last value
+                        poll_page(t_ms)
                     wi = word_index.at(gaze_x, gaze_y, scroll_y, off_x, off_y)
                     if wi is not None:
                         wi += word_offset
@@ -1342,6 +1376,11 @@ def main():
             cv2.imshow("recording (q to stop)", frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
+            if n_frames % 30 == 0:
+                try:
+                    browser.current_url            # she closed the browser: we are done
+                except Exception:
+                    break
     finally:
         # runs on q, on Ctrl-C, and on any bug: the session is ALWAYS closed out
         # and every resource released. Previously only the flush was protected,
@@ -1353,7 +1392,8 @@ def main():
         if flags:
             print(f"WARNING: this session is flagged {flags} -- its word-level data "
                   f"will not be used to personalise your pages")
-        for release in (browser.quit, cap.release, cv2.destroyAllWindows):
+        for release in (browser.quit, (cap.release if cap is not None else (lambda: None)),
+                        cv2.destroyAllWindows):
             try:
                 release()
             except Exception:
