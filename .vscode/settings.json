@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "/opt/anaconda3/envs/mlclass/bin/python",
+  "python.terminal.activateEnvironment": true,
+  "files.exclude": { "**/__pycache__": true }
+}

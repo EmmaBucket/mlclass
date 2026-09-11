@@ -6,6 +6,9 @@ app being closed. Markdown, named after what was read.
     python3 recorder/export_notes.py 12         # a specific session
     python3 recorder/export_notes.py --user 1   # everything one reader marked
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from recorder import _env  # noqa: E402,F401  -- re-launches in the mlclass env if needed
 import os
 import re
 import sys

@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Read (recorder)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/recorder/record.py",
+      "python": "/opt/anaconda3/envs/mlclass/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "My reading profile",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/recorder/progress.py",
+      "python": "/opt/anaconda3/envs/mlclass/bin/python",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

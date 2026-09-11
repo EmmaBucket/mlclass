@@ -10,6 +10,9 @@ every analysis script skip them by the same calibration filter it already uses.
     python3 recorder/import_csv.py            # import anything not already in
     python3 recorder/import_csv.py --dry-run
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from recorder import _env  # noqa: E402,F401  -- re-launches in the mlclass env if needed
 import csv
 import os
 import sys

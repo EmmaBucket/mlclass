@@ -14,6 +14,9 @@ what you saw on screen.
     python3 recorder/notes_pdf.py 24
     python3 recorder/notes_pdf.py --user 1   # one study sheet per session
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from recorder import _env  # noqa: E402,F401  -- re-launches in the mlclass env if needed
 import base64
 import html as H
 import os

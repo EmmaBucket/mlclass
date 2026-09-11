@@ -14,6 +14,9 @@ zero), norm->screen mapping is now calibrated per sitting (recorder/calibrate.py
 and storage is SQLite keyed by user_id instead of loose CSVs keyed by whatever
 name was typed that day ("Emma" and "Emma B" are different people to a CSV).
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from recorder import _env  # noqa: E402,F401  -- re-launches in the mlclass env if needed
 import json
 import re
 import subprocess

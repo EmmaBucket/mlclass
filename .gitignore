@@ -1,2 +1,4 @@
 src/L2ReadingData.xlsx
 diagnostics/geco_cache.pkl
+__pycache__/
+*.pyc

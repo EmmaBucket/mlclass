@@ -19,6 +19,9 @@ cliff. (PRIOR_STRENGTH = 3000 words ~= two good sessions to reach 50/50.)
 Only sessions with trustworthy calibration are used -- a 300 px session's
 word attribution is noise, and training on noise would make the page worse.
 """
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+from recorder import _env  # noqa: E402,F401  -- re-launches in the mlclass env if needed
 import json
 import math
 import os

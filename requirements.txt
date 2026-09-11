@@ -1,0 +1,11 @@
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+opencv-python==4.13.0.92
+mediapipe==0.10.14
+selenium==4.43.0
+pyautogui==0.9.54
+webdriver-manager==4.0.2
+pyobjc-framework-Quartz==12.1
+pyobjc-core==12.1
+openpyxl==3.1.5
