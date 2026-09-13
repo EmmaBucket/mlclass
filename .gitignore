@@ -2,3 +2,22 @@ src/L2ReadingData.xlsx
 diagnostics/geco_cache.pkl
 __pycache__/
 *.pyc
+
+# --- personal data: never publish ---
+recorder/reading.db
+recorder/reading.db-*
+recorder/screenshots/
+recorder/notes/
+recorder/progress.html
+recorder/launch.log
+gaze_data_notebooks/
+
+# --- downloaded reading material (copyright belongs to the authors) ---
+recorder/texts/
+
+# --- large caches (GECO subset: cite the corpus, do not redistribute it) ---
+diagnostics/geco_cache2.pkl
+diagnostics/geco_cache.pkl
+
+# --- local tooling ---
+.vscode/*.log
