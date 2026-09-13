@@ -23,3 +23,6 @@ diagnostics/geco_cache.pkl
 .vscode/*.log
 .DS_Store
 **/.DS_Store
+
+# --- personal drafts, never published ---
+private/
