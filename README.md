@@ -6,6 +6,8 @@ Point a webcam at yourself, open a textbook chapter, and the page rebuilds itsel
 
 This started as a machine-learning course project (Math 408, CSU Channel Islands) and became a working tool I use for my own reading.
 
+Repository: https://github.com/EmmaBucket/mlclass
+
 ---
 
 ## What it does

@@ -21,7 +21,7 @@ A few other things the data insisted on:
 
 It's open on GitHub — code only, my reading data stays on my machine — and I'm still using it to read every week.
 
-github.com/5foot2inches/mlclass
+github.com/EmmaBucket/mlclass
 
 #Dyslexia #Accessibility #MachineLearning #EyeTracking #Python #AssistiveTechnology #LearningInPublic
 
@@ -35,7 +35,7 @@ It watches your eyes through a webcam, rebuilds any textbook chapter with dyslex
 
 Biggest lesson: my first model's AUC 0.97 was a label leak. The honest model scores 0.75 — and that number is worth more.
 
-Code on GitHub: github.com/5foot2inches/mlclass
+Code on GitHub: github.com/EmmaBucket/mlclass
 
 #Dyslexia #Accessibility #MachineLearning #EyeTracking
 
