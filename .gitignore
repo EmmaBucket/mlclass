@@ -21,3 +21,5 @@ diagnostics/geco_cache.pkl
 
 # --- local tooling ---
 .vscode/*.log
+.DS_Store
+**/.DS_Store
